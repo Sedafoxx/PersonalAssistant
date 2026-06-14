@@ -3,13 +3,15 @@ import webPush from "web-push";
 import { createServiceClient } from "@/lib/supabase";
 import { getItemsDueForNotification, updateItem } from "@/lib/db";
 
-webPush.setVapidDetails(
-  `mailto:${process.env.VAPID_EMAIL}`,
-  process.env.VAPID_PUBLIC_KEY!,
-  process.env.VAPID_PRIVATE_KEY!
-);
+export const dynamic = "force-dynamic";
 
 export async function POST() {
+  webPush.setVapidDetails(
+    `mailto:${process.env.VAPID_EMAIL}`,
+    process.env.VAPID_PUBLIC_KEY!,
+    process.env.VAPID_PRIVATE_KEY!
+  );
+
   try {
     const items = await getItemsDueForNotification();
     if (items.length === 0) return NextResponse.json({ sent: 0 });
