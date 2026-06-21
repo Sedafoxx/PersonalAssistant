@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { type Item, type ItemType } from "@/lib/db";
-import { ItemCard } from "./ItemCard";
+import { ItemCard, type ItemEdit } from "./ItemCard";
 
 type Filter = "all" | ItemType;
 type SortKey = "created_at" | "priority" | "due_date";
@@ -62,6 +62,15 @@ export function ItemsSidebar({ refreshKey }: { refreshKey: number }) {
 
   async function handleDelete(id: string) {
     await fetch(`/api/items/${id}`, { method: "DELETE" });
+    fetchItems(search || undefined);
+  }
+
+  async function handleSave(id: string, patch: ItemEdit) {
+    await fetch(`/api/items/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
     fetchItems(search || undefined);
   }
 
@@ -159,6 +168,7 @@ export function ItemsSidebar({ refreshKey }: { refreshKey: number }) {
               item={item}
               onToggleDone={handleToggleDone}
               onDelete={handleDelete}
+              onSave={handleSave}
             />
           ))
         )}

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { type Item } from "@/lib/db";
 
 const TYPE_COLORS: Record<string, string> = {
@@ -16,16 +17,99 @@ const PRIORITY_COLORS = [
   "bg-gray-500",
 ];
 
+export interface ItemEdit {
+  title: string;
+  content: string;
+  priority: number;
+}
+
 export function ItemCard({
   item,
   onToggleDone,
   onDelete,
+  onSave,
 }: {
   item: Item;
   onToggleDone: (id: string, done: boolean) => void;
   onDelete: (id: string) => void;
+  onSave: (id: string, patch: ItemEdit) => Promise<void> | void;
 }) {
   const isDone = item.status === "done";
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(item.title);
+  const [content, setContent] = useState(item.content ?? "");
+  const [priority, setPriority] = useState(item.priority ?? 3);
+  const [saving, setSaving] = useState(false);
+
+  function startEdit() {
+    setTitle(item.title);
+    setContent(item.content ?? "");
+    setPriority(item.priority ?? 3);
+    setEditing(true);
+  }
+
+  async function save() {
+    if (!title.trim()) return;
+    setSaving(true);
+    try {
+      await onSave(item.id, { title: title.trim(), content: content.trim(), priority });
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-2 px-3 py-2.5 rounded-xl bg-white/5">
+        <input
+          autoFocus
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") save();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          placeholder="Title"
+          className="w-full bg-[#1a1a1a] border border-white/10 rounded-lg px-2 py-1.5 text-sm text-gray-200 placeholder-gray-600 outline-none focus:border-indigo-500/50"
+        />
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          placeholder="Notes (optional)"
+          rows={2}
+          className="w-full resize-none bg-[#1a1a1a] border border-white/10 rounded-lg px-2 py-1.5 text-xs text-gray-300 placeholder-gray-600 outline-none focus:border-indigo-500/50"
+        />
+        <div className="flex items-center gap-2">
+          <select
+            value={priority}
+            onChange={(e) => setPriority(Number(e.target.value))}
+            className="text-[10px] bg-[#1a1a1a] border border-white/10 rounded-md px-1.5 py-1 text-gray-300 outline-none cursor-pointer"
+          >
+            <option value={1}>P1 · Critical</option>
+            <option value={2}>P2 · High</option>
+            <option value={3}>P3 · Normal</option>
+            <option value={4}>P4 · Low</option>
+            <option value={5}>P5 · Someday</option>
+          </select>
+          <div className="flex-1" />
+          <button
+            onClick={() => setEditing(false)}
+            className="text-[11px] text-gray-500 hover:text-gray-300 px-2 py-1"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={saving || !title.trim()}
+            className="text-[11px] bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-md px-2.5 py-1 transition-colors"
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
@@ -91,15 +175,28 @@ export function ItemCard({
         )}
       </div>
 
-      {/* Delete */}
-      <button
-        onClick={() => onDelete(item.id)}
-        className="flex-shrink-0 opacity-0 group-hover:opacity-100 text-gray-600 hover:text-red-400 transition-all mt-0.5"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
-        </svg>
-      </button>
+      {/* Actions */}
+      <div className="flex-shrink-0 flex items-center gap-1.5 mt-0.5 opacity-0 group-hover:opacity-100 transition-all">
+        <button
+          onClick={startEdit}
+          className="text-gray-600 hover:text-indigo-400 transition-colors"
+          aria-label="Edit"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 20h9" strokeLinecap="round" />
+            <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+        <button
+          onClick={() => onDelete(item.id)}
+          className="text-gray-600 hover:text-red-400 transition-colors"
+          aria-label="Delete"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }
