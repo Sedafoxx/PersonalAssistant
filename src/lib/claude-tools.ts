@@ -122,12 +122,12 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "search_items",
-      description: "Full-text search across item titles and content.",
+      description:
+        "Search across ALL item types (todos, notes, ideas) by keyword and meaning. Always searches every type — do not assume the user means only ideas. Use the user's words as the query.",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "Search query string." },
-          type: { type: "string", enum: ["todo", "note", "idea"] },
         },
         required: ["query"],
       },
@@ -176,7 +176,6 @@ export async function executeTool(
     case "search_items": {
       const items = await getItems({
         query: input.query as string,
-        type: input.type as ItemType | undefined,
       });
       return JSON.stringify({ items });
     }

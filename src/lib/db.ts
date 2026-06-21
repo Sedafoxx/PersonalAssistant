@@ -68,7 +68,12 @@ export async function getItems(opts: {
     // Lexical: any query word as a substring of title or content.
     let lex = db.from("items").select(ITEM_COLS).neq("status", "archived");
     if (opts.type) lex = lex.eq("type", opts.type);
-    const words = opts.query.trim().split(/\s+/).filter(Boolean);
+    // Drop short stopwords ("in", "to", "i") so they don't match everything
+    // and bury the real hit under the row limit.
+    const words = opts.query
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length >= 3);
     const ors = words.flatMap((w) => [
       `title.ilike.%${w}%`,
       `content.ilike.%${w}%`,
