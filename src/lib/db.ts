@@ -59,17 +59,47 @@ export async function getItems(opts: {
 } = {}): Promise<Item[]> {
   const db = createServiceClient();
 
-  // Semantic search path: embed the query, rank by cosine similarity via RPC.
+  // Hybrid search: combine literal keyword (ilike) matches with semantic
+  // (vector) matches. Keyword hits guarantee literal queries surface the
+  // right item; semantic hits add contextually-related items.
   if (opts.query) {
     const queryEmbedding = await embed(opts.query);
-    const { data, error } = await db.rpc("match_items", {
-      query_embedding: queryEmbedding,
-      match_count: 20,
-      match_threshold: 0.2,
-      filter_type: opts.type ?? null,
-    });
-    if (error) throw new Error(error.message);
-    return (data ?? []).map(stripEmbedding);
+
+    // Lexical: any query word as a substring of title or content.
+    let lex = db.from("items").select(ITEM_COLS).neq("status", "archived");
+    if (opts.type) lex = lex.eq("type", opts.type);
+    const words = opts.query.trim().split(/\s+/).filter(Boolean);
+    const ors = words.flatMap((w) => [
+      `title.ilike.%${w}%`,
+      `content.ilike.%${w}%`,
+    ]);
+    if (ors.length) lex = lex.or(ors.join(","));
+
+    const [semantic, lexical] = await Promise.all([
+      db.rpc("match_items", {
+        query_embedding: queryEmbedding,
+        match_count: 20,
+        match_threshold: 0.2,
+        filter_type: opts.type ?? null,
+      }),
+      lex.limit(20),
+    ]);
+    if (semantic.error) throw new Error(semantic.error.message);
+    if (lexical.error) throw new Error(lexical.error.message);
+
+    const semItems = (semantic.data ?? []).map(stripEmbedding);
+    const lexItems = (lexical.data ?? []) as Item[];
+
+    // Lexical first (literal match = high confidence), then unseen semantic.
+    const seen = new Set<string>();
+    const merged: Item[] = [];
+    for (const it of [...lexItems, ...semItems]) {
+      if (!seen.has(it.id)) {
+        seen.add(it.id);
+        merged.push(it);
+      }
+    }
+    return merged;
   }
 
   let q = db.from("items").select(ITEM_COLS);
