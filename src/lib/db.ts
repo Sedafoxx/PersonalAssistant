@@ -149,7 +149,7 @@ export async function updateItem(
       .from("items")
       .select("title,content")
       .eq("id", id)
-      .single();
+      .maybeSingle();
     const title = input.title ?? current?.title ?? "";
     const content = input.content ?? current?.content ?? null;
     patch.embedding = await embed(itemText(title, content));
@@ -160,8 +160,9 @@ export async function updateItem(
     .update(patch)
     .eq("id", id)
     .select(ITEM_COLS)
-    .single();
+    .maybeSingle();
   if (error) throw new Error(error.message);
+  if (!data) throw new Error(`No item found with id "${id}"`);
   return data as Item;
 }
 
