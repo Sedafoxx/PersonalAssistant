@@ -2,15 +2,22 @@
 
 import { useState, useEffect } from "react";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { JournalPanel } from "@/components/journal/JournalPanel";
 import { ItemsSidebar } from "@/components/sidebar/ItemsSidebar";
 import { setupNotifications } from "@/lib/notifications";
+
+type Tab = "chat" | "journal";
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [tab, setTab] = useState<Tab>("chat");
 
   useEffect(() => {
     setupNotifications();
+    // Honor deep links from notifications, e.g. /?tab=journal
+    const t = new URLSearchParams(window.location.search).get("tab");
+    if (t === "journal" || t === "chat") setTab(t);
   }, []);
 
   return (
@@ -39,10 +46,31 @@ export default function Home() {
             </svg>
           </button>
           <h1 className="text-sm font-semibold text-gray-300">Personal Assistant</h1>
+
+          {/* Tabs */}
+          <div className="ml-auto flex gap-1 bg-white/5 rounded-lg p-0.5">
+            {(["chat", "journal"] as Tab[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`px-3 py-1 rounded-md text-xs font-medium capitalize transition-colors ${
+                  tab === t
+                    ? "bg-indigo-600 text-white"
+                    : "text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
         </div>
 
         <div className="flex-1 overflow-hidden">
-          <ChatPanel onItemsChange={() => setRefreshKey((k) => k + 1)} />
+          {tab === "chat" ? (
+            <ChatPanel onItemsChange={() => setRefreshKey((k) => k + 1)} />
+          ) : (
+            <JournalPanel />
+          )}
         </div>
       </main>
     </div>

@@ -1,8 +1,15 @@
 "use client";
 
+export interface Choices {
+  mode: "single" | "multi";
+  options: string[];
+}
+
 export interface Message {
   role: "user" | "assistant";
   content: string;
+  choices?: Choices;
+  answered?: boolean;
 }
 
 export function MessageBubble({ message }: { message: Message }) {

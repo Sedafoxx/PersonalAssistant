@@ -6,11 +6,13 @@ self.addEventListener("push", (event) => {
       body: data.body,
       icon: data.icon ?? "/icon-192.png",
       badge: "/icon-192.png",
+      data: { url: data.url ?? "/" },
     })
   );
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  event.waitUntil(clients.openWindow("/"));
+  const url = event.notification.data?.url ?? "/";
+  event.waitUntil(clients.openWindow(url));
 });

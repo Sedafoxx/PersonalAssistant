@@ -8,6 +8,12 @@ import {
   type ItemStatus,
   type SortBy,
 } from "./db";
+import {
+  createGoal,
+  getGoals,
+  updateGoal,
+  type GoalStatus,
+} from "./goals";
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
@@ -121,6 +127,100 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "create_goal",
+      description:
+        "Create a long-term goal to track. Use when the user states an aspiration, target, or habit they want to build (e.g. 'I want to run 3x a week', 'read 12 books this year').",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short goal title." },
+          description: { type: "string", description: "Optional detail." },
+          cadence: {
+            type: "string",
+            description:
+              "Optional rhythm: 'daily', 'weekly', 'monthly', or null for one-off.",
+          },
+          target: {
+            type: "number",
+            description:
+              "Optional numeric target (e.g. 12 books, 100 workouts). Goal auto-completes when progress reaches it.",
+          },
+        },
+        required: ["title"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_goals",
+      description:
+        "List the user's goals and their progress. Use when they ask about goals, progress, or how they're tracking.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["active", "done", "archived"],
+            description: "Filter by status. Defaults to active.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_goal",
+      description:
+        "Update a goal by ID — edit fields, set progress, or mark done/archived. Get the ID from list_goals first.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The goal UUID." },
+          title: { type: "string" },
+          description: { type: "string" },
+          cadence: { type: "string" },
+          target: { type: "number" },
+          progress: { type: "number", description: "Set absolute progress value." },
+          status: { type: "string", enum: ["active", "done", "archived"] },
+        },
+        required: ["id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ask_choice",
+      description:
+        "Ask the user to pick from a short list of discrete options via tappable buttons instead of free typing. Use whenever the next step is a clear choice: item type (idea/todo/note), priority level, a yes/no confirmation, or any 'which of these?' question. Do NOT use for open-ended questions. Calling this ends your turn and shows the buttons.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: {
+            type: "string",
+            description: "The question or prompt shown above the buttons.",
+          },
+          options: {
+            type: "array",
+            items: { type: "string" },
+            description: "2-6 short button labels the user can tap.",
+          },
+          mode: {
+            type: "string",
+            enum: ["single", "multi"],
+            description:
+              "single = pick one (sends immediately). multi = pick several then confirm. Default single.",
+          },
+        },
+        required: ["question", "options"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_items",
       description:
         "Search across ALL item types (todos, notes, ideas) by keyword and meaning. Always searches every type — do not assume the user means only ideas. Use the user's words as the query.",
@@ -171,6 +271,35 @@ export async function executeTool(
         sort_by: input.sort_by as SortBy | undefined,
       });
       return JSON.stringify({ items });
+    }
+
+    case "create_goal": {
+      const goal = await createGoal({
+        title: input.title as string,
+        description: input.description as string | undefined,
+        cadence: input.cadence as string | undefined,
+        target: input.target as number | undefined,
+      });
+      return JSON.stringify({ success: true, goal });
+    }
+
+    case "list_goals": {
+      const goals = await getGoals(
+        (input.status as GoalStatus | undefined) ?? "active"
+      );
+      return JSON.stringify({ goals });
+    }
+
+    case "update_goal": {
+      const { id, ...rest } = input as { id: string } & Record<string, unknown>;
+      const goal = await updateGoal(id, rest);
+      return JSON.stringify({ success: true, goal });
+    }
+
+    case "ask_choice": {
+      // Handled specially in the chat route (ends the loop, renders buttons).
+      // No DB side effect.
+      return JSON.stringify({ ok: true });
     }
 
     case "search_items": {

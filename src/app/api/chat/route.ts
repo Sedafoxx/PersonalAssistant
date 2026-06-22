@@ -13,6 +13,8 @@ Guidelines:
 - search_items searches ALL types (todos, notes, ideas) by keyword and meaning. Do not assume the user means only ideas.
 - If a search returns matches, list the relevant ones plainly instead of inventing or guessing.
 - To update, complete, or delete an item you MUST use its real "id" (a UUID). You only have an id if it came from a search_items or list_items result in THIS request. Never invent or guess an id. If the user refers to an item by name (e.g. "mark the couple test done"), FIRST call search_items to get its id, THEN call update_item/delete_item with that exact id.
+- When the next step is a discrete choice (which type: idea/todo/note, a priority level, a yes/no confirmation, or "which of these?"), call ask_choice to show tappable buttons instead of asking in plain prose. Keep options to 2-6 short labels. Use mode "multi" only when several answers can be picked together.
+- When the user states a long-term aspiration, target, or habit ("I want to run 3x a week", "read 12 books this year") → create_goal. When they ask how they're tracking → list_goals. Journal entries auto-advance goal progress, so you usually only create/list goals, not manually bump them.
 - For action items / tasks → create a "todo"
 - For information, references, or things to remember → create a "note"
 - For brainstorming or creative thoughts → create an "idea"
@@ -50,6 +52,24 @@ export async function POST(req: NextRequest) {
       }
 
       if (choice.finish_reason === "tool_calls") {
+        // ask_choice ends the turn and renders tappable buttons on the client.
+        const askCall = choice.message.tool_calls?.find(
+          (t) => t.function.name === "ask_choice"
+        );
+        if (askCall) {
+          const args = JSON.parse(askCall.function.arguments) as {
+            question?: string;
+            options?: string[];
+            mode?: "single" | "multi";
+          };
+          const payload = {
+            mode: args.mode ?? "single",
+            options: args.options ?? [],
+          };
+          const q = args.question ?? choice.message.content ?? "";
+          return `${q}\n\n[[CHOICES]]${JSON.stringify(payload)}`;
+        }
+
         currentMessages.push(choice.message);
 
         for (const toolCall of choice.message.tool_calls ?? []) {
