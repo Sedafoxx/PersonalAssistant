@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import { NextRequest } from "next/server";
 import { TOOL_DEFINITIONS, executeTool } from "@/lib/claude-tools";
+import { logChatMessages } from "@/lib/chat-log";
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -99,6 +100,18 @@ export async function POST(req: NextRequest) {
       try {
         const text = await runLoop();
         controller.enqueue(encoder.encode(text));
+
+        // Log this turn (newest user message + assistant reply) so the
+        // suggestion engine can learn from real conversations. Strip the
+        // choice-button marker from what we store.
+        const lastUser = [...messages]
+          .reverse()
+          .find((m: { role: string }) => m.role === "user");
+        const reply = text.split("[[CHOICES]]")[0].trim();
+        await logChatMessages([
+          ...(lastUser ? [{ role: "user" as const, content: lastUser.content }] : []),
+          ...(reply ? [{ role: "assistant" as const, content: reply }] : []),
+        ]);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
         controller.enqueue(encoder.encode(`Error: ${msg}`));

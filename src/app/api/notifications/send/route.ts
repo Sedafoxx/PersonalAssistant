@@ -3,8 +3,10 @@ import webPush from "web-push";
 import { createServiceClient } from "@/lib/supabase";
 import { getItemsDueForNotification, updateItem } from "@/lib/db";
 import { hasEntryToday } from "@/lib/journal";
+import { generateSuggestions } from "@/lib/suggestions";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 interface Sub {
   endpoint: string;
@@ -66,7 +68,21 @@ export async function POST() {
       journalNudge = true;
     }
 
-    return NextResponse.json({ sent, items: items.length, journalNudge });
+    // 3. Daily self-improvement pass — learn from recent usage and add fresh
+    // suggestions. Non-fatal: never let it break the notification run.
+    let suggestionsAdded = 0;
+    try {
+      suggestionsAdded = (await generateSuggestions()).length;
+    } catch {
+      // ignore — suggestions are best-effort
+    }
+
+    return NextResponse.json({
+      sent,
+      items: items.length,
+      journalNudge,
+      suggestionsAdded,
+    });
   } catch (err) {
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
