@@ -1,6 +1,6 @@
 "use client";
 
-import { STAT_KEYS, type StatKey } from "@/lib/journal";
+import { STAT_KEYS, type StatKey } from "@/lib/stats";
 
 export interface LifeStatsView {
   totalXp: number;

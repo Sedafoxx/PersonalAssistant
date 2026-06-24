@@ -2,19 +2,21 @@ import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
 import { embed } from "./embeddings";
 import { getGoals, incrementGoalProgress, type Goal } from "./goals";
+import { STAT_KEYS, type StatKey, type Stats } from "./stats";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// Re-export so existing server-side imports of these from "@/lib/journal" keep
+// working. The values themselves live in the client-safe ./stats module.
+export { STAT_KEYS };
+export type { StatKey, Stats };
 
-// The five life-stats an entry can feed. Keep in sync with the UI.
-export const STAT_KEYS = [
-  "health",
-  "focus",
-  "social",
-  "creativity",
-  "discipline",
-] as const;
-export type StatKey = (typeof STAT_KEYS)[number];
-export type Stats = Partial<Record<StatKey, number>>;
+// Lazy-init: never construct the OpenAI client at module load. If this module
+// is ever pulled into the client bundle, importing it won't throw on the
+// missing (server-only) OPENAI_API_KEY — only calling enrich() would.
+let _client: OpenAI | null = null;
+function openai(): OpenAI {
+  if (!_client) _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return _client;
+}
 
 const JOURNAL_COLS =
   "id,raw_text,summary,mood,sentiment,topics,stats,xp,created_at";
@@ -118,7 +120,7 @@ export async function enrich(
           .join("\n")}`
       : "\n\nNo active goals — return [] for advanced_goals.";
 
-  const res = await client.chat.completions.create({
+  const res = await openai().chat.completions.create({
     model: "gpt-4o",
     response_format: { type: "json_object" },
     messages: [
