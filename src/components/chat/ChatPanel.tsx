@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { MessageBubble, type Message, type Choices } from "./MessageBubble";
+import { useVoiceInput } from "@/lib/useVoiceInput";
 
 const CHOICES_MARKER = "[[CHOICES]]";
 
@@ -32,12 +33,17 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
   const [messages, setMessages] = useState<Message[]>([WELCOME]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [recording, setRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
+
+  const {
+    recording,
+    transcribing,
+    error: voiceError,
+    toggle: toggleRecording,
+  } = useVoiceInput((t) =>
+    setInput((prev) => (prev ? `${prev} ${t}` : t).trim())
+  );
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -132,58 +138,6 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
       return next;
     });
     sendText(sel.join(", "));
-  }
-
-  async function startRecording() {
-    if (recording || transcribing || loading) return;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) chunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
-        if (blob.size === 0) return;
-
-        setTranscribing(true);
-        try {
-          const ext = recorder.mimeType.includes("mp4") ? "mp4" : "webm";
-          const fd = new FormData();
-          fd.append("audio", blob, `recording.${ext}`);
-          const res = await fetch("/api/transcribe", { method: "POST", body: fd });
-          const data = await res.json();
-          if (data.text) {
-            setInput((prev) => (prev ? `${prev} ${data.text}` : data.text).trim());
-            inputRef.current?.focus();
-          }
-        } catch {
-          // swallow — user can retry
-        } finally {
-          setTranscribing(false);
-        }
-      };
-
-      recorderRef.current = recorder;
-      recorder.start();
-      setRecording(true);
-    } catch {
-      setRecording(false);
-    }
-  }
-
-  function stopRecording() {
-    recorderRef.current?.stop();
-    setRecording(false);
-  }
-
-  function toggleRecording() {
-    if (recording) stopRecording();
-    else startRecording();
   }
 
   function handleKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -290,7 +244,7 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
           />
           <button
             onClick={toggleRecording}
-            disabled={loading || transcribing}
+            disabled={loading || (transcribing && !recording)}
             aria-label={recording ? "Stop recording" : "Record voice"}
             className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               recording
@@ -317,8 +271,12 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
             </svg>
           </button>
         </div>
-        <p className="text-xs text-gray-600 mt-1.5 text-center">
-          Enter to send · Shift+Enter for new line · 🎤 to dictate
+        <p
+          className={`text-xs mt-1.5 text-center ${
+            voiceError ? "text-red-400" : "text-gray-600"
+          }`}
+        >
+          {voiceError ?? "Enter to send · Shift+Enter for new line · 🎤 to dictate"}
         </p>
       </div>
     </div>

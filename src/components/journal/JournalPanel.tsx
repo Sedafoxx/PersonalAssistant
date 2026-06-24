@@ -15,8 +15,8 @@ export function JournalPanel() {
   const [saving, setSaving] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  const { recording, transcribing, toggle } = useVoiceInput((t) =>
-    setText((prev) => (prev ? `${prev} ${t}` : t).trim())
+  const { recording, transcribing, error: voiceError, toggle } = useVoiceInput(
+    (t) => setText((prev) => (prev ? `${prev} ${t}` : t).trim())
   );
 
   async function load() {
@@ -183,7 +183,7 @@ export function JournalPanel() {
           />
           <button
             onClick={toggle}
-            disabled={saving || transcribing}
+            disabled={saving || (transcribing && !recording)}
             aria-label={recording ? "Stop recording" : "Record voice"}
             className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 ${
               recording
@@ -208,9 +208,17 @@ export function JournalPanel() {
             {saving ? "…" : "Log"}
           </button>
         </div>
-        <p className="text-xs text-gray-600 mt-1.5 text-center">
-          Logged entries earn XP and feed your life stats
-        </p>
+        {voiceError ? (
+          <p className="text-xs text-red-400 mt-1.5 text-center">{voiceError}</p>
+        ) : (
+          <p className="text-xs text-gray-600 mt-1.5 text-center">
+            {recording
+              ? "Recording… speak as long as you like, tap mic to finish"
+              : transcribing
+              ? "Transcribing your last bit…"
+              : "Logged entries earn XP and feed your life stats"}
+          </p>
+        )}
       </div>
     </div>
   );
