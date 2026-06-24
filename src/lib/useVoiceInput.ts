@@ -14,12 +14,33 @@ import { useCallback, useRef, useState } from "react";
 // texts are stitched back together in order. Low-bitrate opus keeps every
 // segment well under the body limit.
 const ROTATE_MS = 4 * 60 * 1000; // 4 min per segment
+const OVERLAP_MS = 2000; // segments share ~2s so no word is lost at the cut
 const BITRATE = 32000; // opus ~32 kbps ≈ 0.25 MB/min — plenty for speech
 
 function pickMime(): string | undefined {
   if (typeof MediaRecorder === "undefined") return undefined;
   const types = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
   return types.find((t) => MediaRecorder.isTypeSupported(t));
+}
+
+// Consecutive segments overlap by ~2s, so the same words are transcribed at the
+// end of one segment and the start of the next. Drop that duplicated run from
+// the new segment by matching its leading words against the assembled tail.
+// Requires a >=2-word match so a single shared common word can't false-trigger.
+function dedupSeam(prev: string, next: string, maxWords = 15): string {
+  const nextRaw = next.trim();
+  if (!prev) return nextRaw;
+  const norm = (s: string) => s.toLowerCase().replace(/[^\w\s]/g, "").trim();
+  const prevWords = norm(prev).split(/\s+/).filter(Boolean);
+  const nextWords = nextRaw.split(/\s+/).filter(Boolean);
+  const nextNorm = nextWords.map(norm);
+  const maxN = Math.min(maxWords, prevWords.length, nextWords.length);
+  for (let n = maxN; n >= 2; n--) {
+    const prevTail = prevWords.slice(prevWords.length - n).join(" ");
+    const nextHead = nextNorm.slice(0, n).join(" ");
+    if (prevTail === nextHead) return nextWords.slice(n).join(" ");
+  }
+  return nextRaw;
 }
 
 export function useVoiceInput(onText: (text: string) => void) {
@@ -37,12 +58,21 @@ export function useVoiceInput(onText: (text: string) => void) {
   const pendingRef = useRef(0);
   const bufRef = useRef<Record<number, string>>({});
   const nextEmitRef = useRef(0);
+  const assembledRef = useRef(""); // full voice transcript this session, for seam dedup
 
   const flush = useCallback(() => {
     const buf = bufRef.current;
     while (buf[nextEmitRef.current] !== undefined) {
-      const t = buf[nextEmitRef.current];
-      if (t) onText(t);
+      const seg = buf[nextEmitRef.current];
+      if (seg) {
+        const add = dedupSeam(assembledRef.current, seg);
+        if (add) {
+          assembledRef.current = (
+            assembledRef.current ? `${assembledRef.current} ${add}` : add
+          ).trim();
+          onText(add);
+        }
+      }
       delete buf[nextEmitRef.current];
       nextEmitRef.current += 1;
     }
@@ -113,12 +143,17 @@ export function useVoiceInput(onText: (text: string) => void) {
       pendingRef.current = 0;
       bufRef.current = {};
       nextEmitRef.current = 0;
+      assembledRef.current = "";
 
       startSegment(mime);
       rotateRef.current = setInterval(() => {
-        const cur = recorderRef.current;
-        if (cur && cur.state !== "inactive") cur.stop(); // finalize -> transcribe
-        startSegment(mime); // seamless next segment on the same stream
+        // Start the next segment first, then stop the current one ~2s later, so
+        // both capture the overlap window. dedupSeam removes the duplicate text.
+        const old = recorderRef.current;
+        startSegment(mime);
+        setTimeout(() => {
+          if (old && old.state !== "inactive") old.stop();
+        }, OVERLAP_MS);
       }, ROTATE_MS);
 
       setRecording(true);
