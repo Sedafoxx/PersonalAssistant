@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { type Item, type ItemType } from "@/lib/db";
 import { ItemCard, type ItemEdit } from "./ItemCard";
+import { ItemDetail } from "./ItemDetail";
 
 type Filter = "all" | ItemType;
 type SortKey = "created_at" | "priority" | "due_date";
@@ -21,6 +22,11 @@ export function ItemsSidebar({ refreshKey }: { refreshKey: number }) {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [searchTimeout, setSearchTimeout] = useState<ReturnType<typeof setTimeout> | null>(null);
+  const [detail, setDetail] = useState<Item | null>(null);
+  const [autoEditId, setAutoEditId] = useState<string | null>(null);
+
+  // Keep the open detail panel in sync if the underlying item changes.
+  const detailItem = detail ? items.find((i) => i.id === detail.id) ?? detail : null;
 
   const fetchItems = useCallback(
     async (q?: string) => {
@@ -169,10 +175,24 @@ export function ItemsSidebar({ refreshKey }: { refreshKey: number }) {
               onToggleDone={handleToggleDone}
               onDelete={handleDelete}
               onSave={handleSave}
+              onOpen={setDetail}
+              autoEdit={autoEditId === item.id}
+              onConsumeAutoEdit={() => setAutoEditId(null)}
             />
           ))
         )}
       </div>
+
+      {detailItem && (
+        <ItemDetail
+          item={detailItem}
+          onClose={() => setDetail(null)}
+          onEdit={() => {
+            setAutoEditId(detailItem.id);
+            setDetail(null);
+          }}
+        />
+      )}
     </div>
   );
 }

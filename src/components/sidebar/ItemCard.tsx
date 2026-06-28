@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { type Item } from "@/lib/db";
 
 const TYPE_COLORS: Record<string, string> = {
@@ -28,11 +28,17 @@ export function ItemCard({
   onToggleDone,
   onDelete,
   onSave,
+  onOpen,
+  autoEdit = false,
+  onConsumeAutoEdit,
 }: {
   item: Item;
   onToggleDone: (id: string, done: boolean) => void;
   onDelete: (id: string) => void;
   onSave: (id: string, patch: ItemEdit) => Promise<void> | void;
+  onOpen: (item: Item) => void;
+  autoEdit?: boolean;
+  onConsumeAutoEdit?: () => void;
 }) {
   const isDone = item.status === "done";
   const [editing, setEditing] = useState(false);
@@ -47,6 +53,15 @@ export function ItemCard({
     setPriority(item.priority ?? 3);
     setEditing(true);
   }
+
+  // Opened via "Edit" in the detail overlay → jump straight into editing.
+  useEffect(() => {
+    if (autoEdit) {
+      startEdit();
+      onConsumeAutoEdit?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoEdit]);
 
   async function save() {
     if (!title.trim()) return;
@@ -158,15 +173,21 @@ export function ItemCard({
             />
           )}
         </div>
-        <p
-          className={`text-sm text-gray-200 leading-snug truncate ${
+        <button
+          onClick={() => onOpen(item)}
+          className={`block w-full text-left text-sm text-gray-200 leading-snug truncate hover:text-indigo-300 transition-colors ${
             isDone ? "line-through text-gray-500" : ""
           }`}
         >
           {item.title}
-        </p>
+        </button>
         {item.content && (
-          <p className="text-xs text-gray-500 mt-0.5 truncate">{item.content}</p>
+          <button
+            onClick={() => onOpen(item)}
+            className="block w-full text-left text-xs text-gray-500 mt-0.5 truncate hover:text-gray-400"
+          >
+            {item.content}
+          </button>
         )}
         {item.due_date && (
           <p className="text-[10px] text-gray-600 mt-0.5">

@@ -14,6 +14,13 @@ import {
   updateGoal,
   type GoalStatus,
 } from "./goals";
+import {
+  getList,
+  addToList,
+  removeFromList,
+  clearChecked,
+  type ListKind,
+} from "./lists";
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
@@ -221,6 +228,68 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "add_to_list",
+      description:
+        "Add an item to a persistent shopping list. Use for anything the user needs to buy. 'grocery' = food/supermarket; 'shopping' = everything else (household, hardware, clothes...). Duplicates are ignored automatically — safe to call even if it might already be there. Add one item per call.",
+      parameters: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["grocery", "shopping"] },
+          name: { type: "string", description: "The item to buy, e.g. 'Milk'." },
+        },
+        required: ["list", "name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "remove_from_list",
+      description:
+        "Remove an item from a shopping list by name (e.g. user already bought it or changed their mind).",
+      parameters: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["grocery", "shopping"] },
+          name: { type: "string" },
+        },
+        required: ["list", "name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "view_list",
+      description:
+        "Show the current contents of a shopping list. Use when the user asks what's on their grocery/shopping list.",
+      parameters: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["grocery", "shopping"] },
+        },
+        required: ["list"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "clear_checked_list",
+      description:
+        "Remove all checked-off items from a list. Use after the user says they finished shopping / bought everything checked.",
+      parameters: {
+        type: "object",
+        properties: {
+          list: { type: "string", enum: ["grocery", "shopping"] },
+        },
+        required: ["list"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_items",
       description:
         "Search across ALL item types (todos, notes, ideas) by keyword and meaning. Always searches every type — do not assume the user means only ideas. Use the user's words as the query.",
@@ -307,6 +376,37 @@ export async function executeTool(
         query: input.query as string,
       });
       return JSON.stringify({ items });
+    }
+
+    case "add_to_list": {
+      const { added, item } = await addToList(
+        input.list as ListKind,
+        input.name as string
+      );
+      return JSON.stringify({
+        success: true,
+        added,
+        already_present: !added,
+        item,
+      });
+    }
+
+    case "remove_from_list": {
+      const removed = await removeFromList(
+        input.list as ListKind,
+        input.name as string
+      );
+      return JSON.stringify({ success: true, removed });
+    }
+
+    case "view_list": {
+      const items = await getList(input.list as ListKind);
+      return JSON.stringify({ list: input.list, items });
+    }
+
+    case "clear_checked_list": {
+      const removed = await clearChecked(input.list as ListKind);
+      return JSON.stringify({ success: true, removed });
     }
 
     default:
