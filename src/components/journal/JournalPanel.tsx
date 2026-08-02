@@ -72,6 +72,8 @@ export function JournalPanel() {
       if (data.entry) {
         setEntries((prev) => [data.entry, ...prev]);
         setText("");
+        // Proactively engage: start a reflection about the entry just logged.
+        startReflect();
       }
       if (data.stats) setStats(data.stats);
       if (data.categories) setCategories(data.categories);
