@@ -71,10 +71,17 @@ You should see plain text like:
 
 ## Alternative — WebView widget (free, no KWGT formulas)
 
-If KWGT's web-fetch is being difficult, use a plain WebView-widget app instead
-(any free one, e.g. "WebView Widget" on the Play Store).
+If KWGT's web-fetch is being difficult, use a purpose-built app that renders a
+webpage as a home-screen widget. Two specific, free ones to look for in the
+Play Store:
 
-1. Install a free WebView-widget app and add its widget to your home screen.
+- **WebWormhole** — "put any website on your home screen as a live widget".
+- **Wothan Web Widgets** — shows a website inside a home-screen widget.
+
+(If neither shows up, search "web widget url" and pick one whose screenshots
+show a website actually rendered inside a widget — not a bookmark/shortcut.)
+
+1. Install one of the above and add its widget to your home screen.
 2. Set the widget's URL to the pretty HTML page:
    ```
    https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN&format=html
