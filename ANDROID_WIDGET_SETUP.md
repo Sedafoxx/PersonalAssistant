@@ -26,7 +26,7 @@ Open this in your phone's browser (replace `YOUR_TOKEN` with the value of
 `WIDGET_TOKEN` from the app's `.env.local`):
 
 ```
-https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN&format=text
+https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN
 ```
 
 You should see plain text like:
@@ -51,8 +51,11 @@ You should see plain text like:
 4. Tap that text item → tap the **fx** formula field and paste:
 
    ```
-   $wg("https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN&format=text")$
+   $wg("https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN")$
    ```
+
+   (Keep the URL free of `&` — the endpoint returns text by default, and a `&`
+   in the URL can trip KWGT's formula parser with "invalid argument count".)
 
 5. Style it:
    - **Font size** ~16–20sp, **line spacing** a bit larger than default.
@@ -85,11 +88,12 @@ so tapping the widget opens the app in your browser.
 ## What the endpoint returns
 
 ```
-GET /api/widget/todos?token=<WIDGET_TOKEN>&format=text
+GET /api/widget/todos?token=<WIDGET_TOKEN>
 ```
-Plain text: first line = count, then one todo per line, highest priority first,
-with a short due date when present. `format=json` returns the same data as JSON
-for any other client. The endpoint is read-only and requires the token.
+Plain text by default: first line = count, then one todo per line, highest
+priority first, with a short due date when present. Pass `?format=json` to get
+the same data as JSON for any other client. The endpoint is read-only and
+requires the token.
 
 ## If it stops working
 

@@ -5,9 +5,8 @@ import { getItems } from "@/lib/db";
 // any other external client). Requires ?token=<WIDGET_TOKEN> so todos are not
 // publicly exposed.
 //
-//   ?format=text (default for widgets): plain, newline-separated list that KWGT
-//     fetches with $wg()$ and displays directly — no parsing needed.
-//   ?format=json: structured payload for other clients.
+//   Text is the default (the KWGT widget fetches with $wg()$ and displays it
+//   directly — no parsing needed). Pass ?format=json for a structured payload.
 //
 // Items are active (open) todos/notes/ideas, highest priority first.
 export async function GET(req: NextRequest) {
@@ -17,7 +16,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  const format = req.nextUrl.searchParams.get("format") ?? "json";
+  const format = req.nextUrl.searchParams.get("format") ?? "text";
 
   try {
     const all = await getItems({ status: "active" });
