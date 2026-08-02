@@ -26,6 +26,8 @@ export function JournalPanel() {
   const [reflecting, setReflecting] = useState(false);
   const reflEndRef = useRef<HTMLDivElement>(null);
   const reflInputRef = useRef<HTMLInputElement>(null);
+  // Guard so the auto-ask on open only fires once per journal mount.
+  const didAutoAsk = useRef(false);
 
   const { recording, transcribing, error: voiceError, toggle } = useVoiceInput(
     (t) => setText((prev) => (prev ? `${prev} ${t}` : t).trim())
@@ -40,6 +42,12 @@ export function JournalPanel() {
       if (data.goals) setGoals(data.goals);
       if (data.categories) setCategories(data.categories);
       if (data.memories) setMemories(data.memories);
+      // The app asks first: opening the journal auto-starts a guided
+      // reflection, so the AI immediately greets you with a question.
+      if (!didAutoAsk.current) {
+        didAutoAsk.current = true;
+        startReflect();
+      }
     } catch {
       // ignore
     }

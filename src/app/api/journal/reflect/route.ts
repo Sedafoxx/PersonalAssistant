@@ -22,11 +22,15 @@ export async function POST(req: NextRequest) {
     const entry = entry_id
       ? recent.find((e) => e.id === entry_id) ?? recent[0]
       : recent[0];
+    // No entries yet: still greet the user with an opening question so the
+    // app can always ask, even on a fresh journal.
     if (!entry) {
-      return NextResponse.json(
-        { error: "Log a journal entry first, then reflect on it." },
-        { status: 400 }
-      );
+      return NextResponse.json({
+        reply:
+          "Welcome back! I'd love to hear what's on your mind today — what's been taking up most of your headspace lately?",
+        memory: null,
+        categories: [],
+      });
     }
 
     const [categories, memories, goals] = await Promise.all([
