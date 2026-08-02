@@ -26,15 +26,37 @@ function splitChoices(raw: string): { text: string; choices?: Choices } {
 const WELCOME: Message = {
   role: "assistant",
   content:
-    "Hey! I'm your personal assistant. Tell me what's on your mind — I'll help you capture todos, notes, and ideas, set reminders, and keep everything organized.",
+    "Hey! I'm your personal assistant. Tell me what's on your mind — I'll help you capture todos, notes, and ideas, set reminders, keep everything organized, and now I can also search the web and read files.",
 };
+
+// A stable per-browser id so the assistant remembers this conversation.
+function getClientId(): string {
+  if (typeof window === "undefined") return "server";
+  try {
+    let id = localStorage.getItem("pa:clientId");
+    if (!id) {
+      id = window.crypto?.randomUUID?.() ?? `c-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem("pa:clientId", id);
+    }
+    return id;
+  } catch {
+    return "anon";
+  }
+}
+
+const TEXT_EXTS = /\.(txt|md|csv|json|ts|tsx|js|jsx|py|sql|html|css|log|ini|yml|yaml|xml)$/i;
+const MAX_ATTACH_CHARS = 50000;
 
 export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
   const [messages, setMessages] = useState<Message[]>([WELCOME]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [attachedFile, setAttachedFile] = useState<{ name: string; text: string } | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const clientIdRef = useRef<string | null>(null);
 
   const {
     recording,
@@ -46,6 +68,10 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
   );
 
   useEffect(() => {
+    clientIdRef.current = getClientId();
+  }, []);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
@@ -53,34 +79,80 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
 
   function send() {
     const text = input.trim();
-    if (!text || loading) return;
+    if ((!text && !attachedFile) || loading) return;
     setInput("");
     sendText(text);
   }
 
-  async function sendText(text: string) {
-    if (!text || loading) return;
+  // Reads a file into text: plain-text types client-side, everything else
+  // (PDF/DOCX/…) via the server parser at /api/upload.
+  async function handleFile(file: File) {
+    setFileError(null);
+    try {
+      let text: string;
+      if (TEXT_EXTS.test(file.name)) {
+        if (file.size > 4 * 1024 * 1024) {
+          setFileError("Text file too large (max 4 MB).");
+          return;
+        }
+        text = await file.text();
+      } else {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/upload", { method: "POST", body: fd });
+        const data = await res.json();
+        if (!res.ok) {
+          setFileError(data.error ?? "Upload failed");
+          return;
+        }
+        text = data.text ?? "";
+      }
+      if (!text.trim()) {
+        setFileError("No readable text found in that file.");
+        return;
+      }
+      setAttachedFile({
+        name: file.name,
+        text: text.slice(0, MAX_ATTACH_CHARS),
+      });
+    } catch (e) {
+      setFileError(e instanceof Error ? e.message : "Could not read file");
+    }
+  }
+
+  async function sendText(raw: string) {
+    if (loading) return;
+
+    const attach = attachedFile;
+    if (attach) setAttachedFile(null);
+    const displayText =
+      raw.trim() || (attach ? `(attached file: ${attach.name})` : "");
+    if (!displayText) return;
+
+    // Fold the file content into the user message as context for the model.
+    let message = raw.trim();
+    if (attach) {
+      const fileBlock = `[Attached file: ${attach.name}]\n\`\`\`\n${attach.text}\n\`\`\`\n\n`;
+      message = message
+        ? `${fileBlock}${message}`
+        : `${fileBlock}Please read the attached file and help me with it.`;
+    }
 
     // Mark any pending choice prompt as answered so its buttons disappear.
     const cleared = messages.map((m) =>
       m.choices && !m.answered ? { ...m, answered: true } : m
     );
-    const userMessage: Message = { role: "user", content: text };
-    const nextMessages = [...cleared, userMessage];
-    setMessages(nextMessages);
+    const userMessage: Message = { role: "user", content: displayText };
+    setMessages([...cleared, userMessage]);
     setLoading(true);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // Send only role + clean content (no marker, no choice metadata).
-        body: JSON.stringify({
-          messages: nextMessages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-        }),
+        // Server reconstructs the conversation from per-client memory, so we
+        // only send the new message + the stable client id.
+        body: JSON.stringify({ message, client_id: clientIdRef.current }),
       });
 
       if (!res.body) throw new Error("No response body");
@@ -89,7 +161,6 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
       const decoder = new TextDecoder();
       let assistantText = "";
 
-      // Add placeholder
       setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
 
       while (true) {
@@ -219,7 +290,48 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
 
       {/* Input */}
       <div className="px-4 pb-4 pt-2 border-t border-white/5">
+        {/* Attached file chip */}
+        {attachedFile && (
+          <div className="mb-2 flex items-center gap-2 bg-indigo-600/10 border border-indigo-500/30 rounded-lg px-3 py-1.5 text-xs text-indigo-200">
+            <span>📎 {attachedFile.name}</span>
+            <span className="text-indigo-400/70">
+              ({Math.round(attachedFile.text.length / 1024)} KB loaded)
+            </span>
+            <button
+              onClick={() => setAttachedFile(null)}
+              className="ml-auto text-indigo-300 hover:text-white"
+              aria-label="Remove file"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        {fileError && (
+          <div className="mb-2 text-xs text-red-400">{fileError}</div>
+        )}
+
         <div className="flex gap-2 items-end bg-[#1a1a1a] border border-white/10 rounded-2xl px-4 py-3 focus-within:border-indigo-500/50 transition-colors">
+          <input
+            ref={fileInputRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) handleFile(f);
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            aria-label="Attach file"
+            title="Attach a file (txt, pdf, docx, csv, code…)"
+            className="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center bg-white/10 hover:bg-white/20 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
           <textarea
             ref={inputRef}
             value={input}
@@ -263,7 +375,7 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
           </button>
           <button
             onClick={send}
-            disabled={loading || !input.trim()}
+            disabled={loading || (!input.trim() && !attachedFile)}
             className="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition-colors"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -273,10 +385,11 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
         </div>
         <p
           className={`text-xs mt-1.5 text-center ${
-            voiceError ? "text-red-400" : "text-gray-600"
+            voiceError || fileError ? "text-red-400" : "text-gray-600"
           }`}
         >
-          {voiceError ?? "Enter to send · Shift+Enter for new line · 🎤 to dictate"}
+          {(voiceError ?? fileError) ??
+            "Enter to send · Shift+Enter for new line · 🎤 to dictate · 📎 to attach a file"}
         </p>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import { createServiceClient } from "./supabase";
 import { embed, itemText } from "./embeddings";
+import { xpForTask } from "./stats";
 
 export type ItemType = "todo" | "note" | "idea";
 export type ItemStatus = "active" | "done" | "archived";
@@ -7,7 +8,7 @@ export type SortBy = "priority" | "created_at" | "due_date";
 
 // Columns to return — excludes `embedding` to keep payloads small.
 const ITEM_COLS =
-  "id,type,title,content,priority,status,tags,due_date,notification_time,created_at,updated_at";
+  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,created_at,updated_at";
 
 // Drop embedding from rows returned by the match_items RPC (returns setof items).
 function stripEmbedding(row: Record<string, unknown>): Item {
@@ -26,6 +27,7 @@ export interface Item {
   tags: string[];
   due_date: string | null;
   notification_time: string | null;
+  xp_awarded: number;
   created_at: string;
   updated_at: string;
 }
@@ -136,23 +138,48 @@ export async function createItem(input: CreateItemInput): Promise<Item> {
 export async function updateItem(
   id: string,
   input: UpdateItemInput
-): Promise<Item> {
+): Promise<Item & { xpGained: number }> {
   const db = createServiceClient();
   const patch: Record<string, unknown> = {
     ...input,
     updated_at: new Date().toISOString(),
   };
 
-  // Re-embed when title or content changes; merge with existing values for the other field.
-  if (input.title !== undefined || input.content !== undefined) {
-    const { data: current } = await db
+  const needsCurrent =
+    input.title !== undefined ||
+    input.content !== undefined ||
+    input.status === "done";
+
+  let current:
+    | { title?: string; content?: string | null; type?: ItemType; status?: ItemStatus; priority?: number; xp_awarded?: number }
+    | null = null;
+  if (needsCurrent) {
+    const { data } = await db
       .from("items")
-      .select("title,content")
+      .select("title,content,type,status,priority,xp_awarded")
       .eq("id", id)
       .maybeSingle();
+    current = data;
+  }
+
+  // Re-embed when title or content changes; merge with existing values for the other field.
+  if (input.title !== undefined || input.content !== undefined) {
     const title = input.title ?? current?.title ?? "";
     const content = input.content ?? current?.content ?? null;
     patch.embedding = await embed(itemText(title, content));
+  }
+
+  // Gamified completion: award XP the first time a todo goes active -> done.
+  // Stored on the row (xp_awarded) so re-completing never double-counts.
+  let xpGained = 0;
+  if (
+    input.status === "done" &&
+    current?.type === "todo" &&
+    current.status !== "done" &&
+    (current.xp_awarded ?? 0) === 0
+  ) {
+    xpGained = xpForTask(current.priority ?? 3);
+    patch.xp_awarded = xpGained;
   }
 
   const { data, error } = await db
@@ -163,7 +190,7 @@ export async function updateItem(
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error(`No item found with id "${id}"`);
-  return data as Item;
+  return { ...(data as Item), xpGained };
 }
 
 export async function deleteItem(id: string): Promise<void> {

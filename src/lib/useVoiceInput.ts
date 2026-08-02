@@ -43,10 +43,16 @@ function dedupSeam(prev: string, next: string, maxWords = 15): string {
   return nextRaw;
 }
 
+export interface VoiceDebug {
+  segments: { idx: number; kb: number }[];
+  dedups: number; // how many seams had duplicate words trimmed
+}
+
 export function useVoiceInput(onText: (text: string) => void) {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debug, setDebug] = useState<VoiceDebug>({ segments: [], dedups: 0 });
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -66,6 +72,9 @@ export function useVoiceInput(onText: (text: string) => void) {
       const seg = buf[nextEmitRef.current];
       if (seg) {
         const add = dedupSeam(assembledRef.current, seg);
+        if (assembledRef.current && add !== seg.trim()) {
+          setDebug((d) => ({ ...d, dedups: d.dedups + 1 }));
+        }
         if (add) {
           assembledRef.current = (
             assembledRef.current ? `${assembledRef.current} ${add}` : add

@@ -21,6 +21,13 @@ import {
   clearChecked,
   type ListKind,
 } from "./lists";
+import {
+  listUpcomingEvents,
+  createEvent,
+  updateEvent,
+  deleteEvent,
+} from "./calendar";
+import { searchWeb, fetchPageText } from "./web";
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
@@ -290,6 +297,90 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "list_calendar_events",
+      description:
+        "Read upcoming events from the user's Google Calendar. Use when they ask what's on their schedule, if they're free, when something is, or before booking to check for conflicts.",
+      parameters: {
+        type: "object",
+        properties: {
+          days_ahead: {
+            type: "number",
+            description: "How many days from now to look. Default 7.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_calendar_event",
+      description:
+        "Create a real appointment on the user's Google Calendar. Use when they want to schedule, book, or plan something at a specific time (e.g. 'dentist Tuesday 3pm', 'lunch with Theresa Friday'). This is different from a todo — use this for things that happen AT a time. Always confirm the time you booked.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Event title." },
+          start: {
+            type: "string",
+            description:
+              "Local start datetime, no timezone suffix: 'YYYY-MM-DDTHH:MM:SS' (interpreted as Europe/Vienna). For all-day, use 'YYYY-MM-DD' and set all_day true.",
+          },
+          end: {
+            type: "string",
+            description:
+              "Local end datetime, same format as start. If the user gives no duration, default to 1 hour after start. For all-day, the day AFTER the last day.",
+          },
+          all_day: {
+            type: "boolean",
+            description: "True for all-day events. Default false.",
+          },
+          location: { type: "string", description: "Optional location." },
+          description: { type: "string", description: "Optional notes." },
+        },
+        required: ["title", "start", "end"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_calendar_event",
+      description:
+        "Reschedule or edit an existing calendar event. You MUST have the event's real id from a list_calendar_events call in THIS request — never guess it. Only pass the fields that change.",
+      parameters: {
+        type: "object",
+        properties: {
+          event_id: { type: "string", description: "The event id (from list_calendar_events)." },
+          title: { type: "string" },
+          start: { type: "string", description: "New local start, same format as create." },
+          end: { type: "string", description: "New local end, same format as create." },
+          all_day: { type: "boolean" },
+          location: { type: "string" },
+          description: { type: "string" },
+        },
+        required: ["event_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete_calendar_event",
+      description:
+        "Cancel/delete a calendar event. You MUST have the event's real id from a list_calendar_events call in THIS request — never guess it.",
+      parameters: {
+        type: "object",
+        properties: {
+          event_id: { type: "string", description: "The event id (from list_calendar_events)." },
+        },
+        required: ["event_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "search_items",
       description:
         "Search across ALL item types (todos, notes, ideas) by keyword and meaning. Always searches every type — do not assume the user means only ideas. Use the user's words as the query.",
@@ -299,6 +390,36 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
           query: { type: "string", description: "Search query string." },
         },
         required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_web",
+      description:
+        "Search the live web (Tavily) and return the top results with titles, URLs, and content snippets. Use for current events, recent news, live data, or anything you're not confident about — especially things that may have happened after your training data.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "The search query." },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_url",
+      description:
+        "Fetch a web page and return its readable text. Use after search_web to read a specific article or page in full before answering.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "The URL to fetch." },
+        },
+        required: ["url"],
       },
     },
   },
@@ -407,6 +528,67 @@ export async function executeTool(
     case "clear_checked_list": {
       const removed = await clearChecked(input.list as ListKind);
       return JSON.stringify({ success: true, removed });
+    }
+
+    case "list_calendar_events": {
+      try {
+        const events = await listUpcomingEvents({
+          daysAhead: input.days_ahead as number | undefined,
+        });
+        return JSON.stringify({ events });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : "calendar read failed" });
+      }
+    }
+
+    case "create_calendar_event": {
+      try {
+        const event = await createEvent({
+          title: input.title as string,
+          start: input.start as string,
+          end: input.end as string,
+          allDay: input.all_day as boolean | undefined,
+          location: input.location as string | undefined,
+          description: input.description as string | undefined,
+        });
+        return JSON.stringify({ success: true, event });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : "create event failed" });
+      }
+    }
+
+    case "update_calendar_event": {
+      try {
+        const event = await updateEvent({
+          eventId: input.event_id as string,
+          title: input.title as string | undefined,
+          start: input.start as string | undefined,
+          end: input.end as string | undefined,
+          allDay: input.all_day as boolean | undefined,
+          location: input.location as string | undefined,
+          description: input.description as string | undefined,
+        });
+        return JSON.stringify({ success: true, event });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : "update event failed" });
+      }
+    }
+
+    case "delete_calendar_event": {
+      try {
+        await deleteEvent(input.event_id as string);
+        return JSON.stringify({ success: true });
+      } catch (e) {
+        return JSON.stringify({ error: e instanceof Error ? e.message : "delete event failed" });
+      }
+    }
+
+    case "search_web": {
+      return await searchWeb(input.query as string);
+    }
+
+    case "fetch_url": {
+      return await fetchPageText(input.url as string);
     }
 
     default:

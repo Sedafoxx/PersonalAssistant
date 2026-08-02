@@ -11,7 +11,16 @@ type Tab = "chat" | "journal" | "lists";
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Chat is the default view: the items sidebar starts collapsed so opening the
+  // app lands on chat, not the todo/ideas list. The toggle is remembered.
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return localStorage.getItem("pa:sidebarOpen") === "1";
+    } catch {
+      return false;
+    }
+  });
   const [tab, setTab] = useState<Tab>("chat");
 
   useEffect(() => {
@@ -20,6 +29,15 @@ export default function Home() {
     const t = new URLSearchParams(window.location.search).get("tab");
     if (t === "journal" || t === "chat" || t === "lists") setTab(t);
   }, []);
+
+  // Remember the sidebar preference across sessions.
+  useEffect(() => {
+    try {
+      localStorage.setItem("pa:sidebarOpen", sidebarOpen ? "1" : "0");
+    } catch {
+      // ignore (private mode etc.)
+    }
+  }, [sidebarOpen]);
 
   return (
     <div className="flex h-screen bg-[#0f0f0f] text-gray-100">

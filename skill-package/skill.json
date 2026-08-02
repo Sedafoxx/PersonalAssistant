@@ -1,0 +1,31 @@
+{
+  "manifest": {
+    "publishingInformation": {
+      "locales": {
+        "en-US": {
+          "summary": "Voice control for your personal assistant app.",
+          "examplePhrases": [
+            "Alexa, tell personal assistant to add milk to my grocery list",
+            "Alexa, ask personal assistant what is on my shopping list",
+            "Alexa, open personal assistant"
+          ],
+          "name": "Personal Assistant",
+          "description": "Lets you manage your grocery and shopping lists by voice, and ask your personal assistant anything you'd normally type in the app — todos, reminders, calendar, and more. Backed by your own PersonalAssistant app."
+        }
+      },
+      "isAvailableWorldwide": true,
+      "testingInstructions": "Personal skill for the device owner. Say 'add milk to my grocery list', 'what's on my shopping list', or any request your app assistant handles.",
+      "category": "ORGANIZERS_AND_ASSISTANTS",
+      "distributionCountries": []
+    },
+    "apis": {
+      "custom": {
+        "endpoint": {
+          "uri": "https://personal-assistant-dp8kvfdqw-sedafoxxs-projects.vercel.app/api/alexa",
+          "sslCertificateType": "Wildcard"
+        }
+      }
+    },
+    "manifestVersion": "1.0"
+  }
+}

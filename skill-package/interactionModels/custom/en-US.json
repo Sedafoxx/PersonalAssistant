@@ -1,0 +1,203 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "personal assistant",
+      "intents": [
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.NavigateHomeIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        },
+        {
+          "name": "AddToListIntent",
+          "slots": [
+            {
+              "name": "Item",
+              "type": "ITEM"
+            },
+            {
+              "name": "ListType",
+              "type": "LIST_TYPE"
+            }
+          ],
+          "samples": [
+            "add {Item} to my {ListType} list",
+            "add {Item} to the {ListType} list",
+            "add {Item} to my list",
+            "add {Item} to the list",
+            "put {Item} on my {ListType} list",
+            "put {Item} on the {ListType} list",
+            "add {Item}",
+            "put {Item} on the list",
+            "buy {Item}",
+            "I need {Item}",
+            "we need {Item}",
+            "I want {Item}"
+          ]
+        },
+        {
+          "name": "ViewListIntent",
+          "slots": [
+            {
+              "name": "ListType",
+              "type": "LIST_TYPE"
+            }
+          ],
+          "samples": [
+            "what is on my {ListType} list",
+            "what is on the {ListType} list",
+            "show me my {ListType} list",
+            "what is on my list",
+            "show me my list",
+            "what do I need to buy",
+            "what do I need from the store",
+            "what is on my grocery list"
+          ]
+        },
+        {
+          "name": "RemoveFromListIntent",
+          "slots": [
+            {
+              "name": "Item",
+              "type": "ITEM"
+            },
+            {
+              "name": "ListType",
+              "type": "LIST_TYPE"
+            }
+          ],
+          "samples": [
+            "remove {Item} from my {ListType} list",
+            "remove {Item} from the {ListType} list",
+            "take {Item} off my {ListType} list",
+            "remove {Item}",
+            "take {Item} off the list",
+            "I already bought {Item}",
+            "I don't need {Item} anymore"
+          ]
+        },
+        {
+          "name": "ClearListIntent",
+          "slots": [
+            {
+              "name": "ListType",
+              "type": "LIST_TYPE"
+            }
+          ],
+          "samples": [
+            "clear my {ListType} list",
+            "clear the {ListType} list",
+            "clear my list",
+            "empty my {ListType} list",
+            "empty the {ListType} list"
+          ]
+        },
+        {
+          "name": "ClearCheckedIntent",
+          "slots": [
+            {
+              "name": "ListType",
+              "type": "LIST_TYPE"
+            }
+          ],
+          "samples": [
+            "I bought everything on my {ListType} list",
+            "I finished shopping on my {ListType} list",
+            "I'm done with my {ListType} list",
+            "check off everything on my {ListType} list"
+          ]
+        },
+        {
+          "name": "AssistantQueryIntent",
+          "slots": [
+            {
+              "name": "Query",
+              "type": "AMAZON.SearchQuery"
+            }
+          ],
+          "samples": [
+            "ask the assistant to {Query}",
+            "tell the assistant {Query}",
+            "can you {Query}",
+            "help me {Query}",
+            "please {Query}",
+            "I need you to {Query}"
+          ]
+        }
+      ],
+      "types": [
+        {
+          "name": "ITEM",
+          "values": [
+            { "name": { "value": "milk" } },
+            { "name": { "value": "bread" } },
+            { "name": { "value": "eggs" } },
+            { "name": { "value": "cheese" } },
+            { "name": { "value": "butter" } },
+            { "name": { "value": "bananas" } },
+            { "name": { "value": "apples" } },
+            { "name": { "value": "oranges" } },
+            { "name": { "value": "tomatoes" } },
+            { "name": { "value": "onions" } },
+            { "name": { "value": "potatoes" } },
+            { "name": { "value": "pasta" } },
+            { "name": { "value": "rice" } },
+            { "name": { "value": "cereal" } },
+            { "name": { "value": "yogurt" } },
+            { "name": { "value": "coffee" } },
+            { "name": { "value": "tea" } },
+            { "name": { "value": "chicken" } },
+            { "name": { "value": "salmon" } },
+            { "name": { "value": "water" } },
+            { "name": { "value": "orange juice" } },
+            { "name": { "value": "chocolate" } },
+            { "name": { "value": "salt" } },
+            { "name": { "value": "sugar" } },
+            { "name": { "value": "olive oil" } },
+            { "name": { "value": "toilet paper" } },
+            { "name": { "value": "paper towels" } },
+            { "name": { "value": "soap" } },
+            { "name": { "value": "shampoo" } },
+            { "name": { "value": "detergent" } },
+            { "name": { "value": "dish soap" } },
+            { "name": { "value": "batteries" } },
+            { "name": { "value": "light bulbs" } },
+            { "name": { "value": "garbage bags" } }
+          ]
+        },
+        {
+          "name": "LIST_TYPE",
+          "values": [
+            {
+              "name": {
+                "value": "grocery",
+                "synonyms": ["groceries", "grocery list", "supermarket", "food"]
+              }
+            },
+            {
+              "name": {
+                "value": "shopping",
+                "synonyms": ["shopping list", "general shopping", "household"]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

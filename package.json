@@ -8,11 +8,21 @@
     "start": "next start",
     "lint": "next lint",
     "migrate": "node --env-file=.env.local scripts/migrate.mjs",
-    "suggestions": "node --env-file=.env.local scripts/suggestions.mjs"
+    "suggestions": "node --env-file=.env.local scripts/suggestions.mjs",
+    "ask:prepare": "node --env-file=.env.local scripts/prepare-skill.mjs",
+    "ask:smoke": "node --env-file=.env.local --import tsx scripts/alexa-smoke.ts",
+    "ask:features": "node --env-file=.env.local --import tsx scripts/feature-test.ts",
+    "ask:deploy": "npm run ask:prepare && ask deploy"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",
+    "ask-sdk-core": "^2.14.0",
+    "ask-sdk-model": "^1.86.0",
+    "mammoth": "^1.9.0",
+    "pdf-parse": "^1.1.1",
+    "googleapis": "^173.0.0",
     "next": "^15.3.3",
+    "next-auth": "^4.24.14",
     "openai": "^4.98.0",
     "pg": "^8.22.0",
     "react": "^19.0.0",
@@ -25,11 +35,13 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/web-push": "^3.6.4",
+    "ask-cli": "^2.30.0",
     "autoprefixer": "^10",
     "eslint": "^9",
     "eslint-config-next": "^15.3.3",
     "postcss": "^8",
     "tailwindcss": "^3.4.1",
+    "tsx": "^4.19.0",
     "typescript": "^5"
   }
 }

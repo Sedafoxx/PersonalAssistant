@@ -41,6 +41,8 @@ export interface LifeStats {
   streak: number; // consecutive days ending today (or yesterday) with an entry
   statTotals: Record<StatKey, number>;
   entryCount: number;
+  tasksXp: number; // XP earned from completed todos (subset of totalXp)
+  tasksCompleted: number;
 }
 
 // --- gamification math -----------------------------------------------------
@@ -227,13 +229,24 @@ export async function hasEntryToday(): Promise<boolean> {
 
 export async function getLifeStats(): Promise<LifeStats> {
   const db = createServiceClient();
-  const { data, error } = await db
-    .from("journal_entries")
-    .select("xp,stats,created_at");
-  if (error) throw new Error(error.message);
+  const [journalRes, taskRes] = await Promise.all([
+    db.from("journal_entries").select("xp,stats,created_at"),
+    db.from("items").select("xp_awarded").gt("xp_awarded", 0),
+  ]);
+  if (journalRes.error) throw new Error(journalRes.error.message);
+  if (taskRes.error) throw new Error(taskRes.error.message);
 
-  const rows = (data ?? []) as { xp: number; stats: Stats; created_at: string }[];
-  const totalXp = rows.reduce((s, r) => s + (r.xp ?? 0), 0);
+  const rows = (journalRes.data ?? []) as {
+    xp: number;
+    stats: Stats;
+    created_at: string;
+  }[];
+  const taskRows = (taskRes.data ?? []) as { xp_awarded: number }[];
+
+  const journalXp = rows.reduce((s, r) => s + (r.xp ?? 0), 0);
+  const tasksXp = taskRows.reduce((s, r) => s + (r.xp_awarded ?? 0), 0);
+  const totalXp = journalXp + tasksXp;
+
   const statTotals = Object.fromEntries(
     STAT_KEYS.map((k) => [k, 0])
   ) as Record<StatKey, number>;
@@ -249,5 +262,7 @@ export async function getLifeStats(): Promise<LifeStats> {
     streak: computeStreak(rows.map((r) => r.created_at)),
     statTotals,
     entryCount: rows.length,
+    tasksXp,
+    tasksCompleted: taskRows.length,
   };
 }

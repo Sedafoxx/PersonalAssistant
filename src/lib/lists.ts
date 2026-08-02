@@ -102,3 +102,16 @@ export async function clearChecked(list: ListKind): Promise<number> {
   if (error) throw new Error(error.message);
   return (data ?? []).length;
 }
+
+// Removes EVERYTHING from a list (checked and unchecked). Use only for an
+// explicit "clear my list" request. Returns count removed.
+export async function clearList(list: ListKind): Promise<number> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("list_items")
+    .delete()
+    .eq("list", list)
+    .select("id");
+  if (error) throw new Error(error.message);
+  return (data ?? []).length;
+}
