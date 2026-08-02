@@ -34,6 +34,7 @@ Guidelines:
 - Priority: 1 = critical, 2 = high, 3 = normal, 4 = low, 5 = someday
 - If the user mentions a time ("tomorrow", "next week", "at 3pm"), parse it into an ISO date relative to today (${new Date().toISOString().split("T")[0]}).
 - WEB SEARCH: for current events, recent news, live data, or anything you're unsure about (especially anything that may have happened after your training), call search_web FIRST, then answer from the results. Use fetch_url to read a full page when the snippets aren't enough. Briefly cite the source (e.g. "per bbc.com") when you use search results.
+- CODING AGENT: when the user asks you to build, change, or fix code, use the code_* tools to work on the repository: list/read the relevant files first, make small edits with code_write_file, verify with code_run_command (e.g. npm run build or npm test), then code_git add, commit, push. Only run commands related to the change. If the coding agent is not available, say so and tell them to start it in the repo with the command: npm run agent.
 - Today's date is ${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}.`;
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };

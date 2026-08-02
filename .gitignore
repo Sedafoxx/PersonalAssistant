@@ -21,3 +21,6 @@ graphify-out/
 
 # alexa / ask-cli
 .ask/
+
+# coding-agent scratch test dir
+.agent-test/

@@ -28,6 +28,13 @@ import {
   deleteEvent,
 } from "./calendar";
 import { searchWeb, fetchPageText } from "./web";
+import {
+  codeReadFile,
+  codeWriteFile,
+  codeListDir,
+  codeRunCommand,
+  codeGit,
+} from "./coding-agent";
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
@@ -423,6 +430,80 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "code_read_file",
+      description:
+        "Read a file in the project repository (path relative to repo root). Use to inspect code before editing.",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Path relative to repo root." } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_write_file",
+      description:
+        "Write (create or overwrite) a file in the project repository (path relative to repo root). Use to make code changes.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path relative to repo root." },
+          content: { type: "string", description: "Full file contents." },
+        },
+        required: ["path", "content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_list_dir",
+      description:
+        "List the contents of a directory in the project repository (path relative to repo root, default '.').",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "Path relative to repo root." } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_run_command",
+      description:
+        "Run a shell command in the project repository, e.g. 'npm test' or 'npm run build'. Use to verify changes. cwd is relative to repo root (default '.').",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "The shell command." },
+          cwd: { type: "string", description: "Optional working dir relative to repo root." },
+        },
+        required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "code_git",
+      description:
+        "Git operations in the repo. action: 'status' (uncommitted changes), 'diff', 'add' (stage all), 'commit' (requires message), 'push', 'log' (recent commits).",
+      parameters: {
+        type: "object",
+        properties: {
+          action: { type: "string", enum: ["status", "diff", "add", "commit", "push", "log"] },
+          message: { type: "string", description: "Commit message (required for commit)." },
+        },
+        required: ["action"],
+      },
+    },
+  },
 ];
 
 export async function executeTool(
@@ -589,6 +670,26 @@ export async function executeTool(
 
     case "fetch_url": {
       return await fetchPageText(input.url as string);
+    }
+
+    case "code_read_file": {
+      return await codeReadFile(input.path as string);
+    }
+
+    case "code_write_file": {
+      return await codeWriteFile(input.path as string, input.content as string);
+    }
+
+    case "code_list_dir": {
+      return await codeListDir(input.path as string);
+    }
+
+    case "code_run_command": {
+      return await codeRunCommand(input.command as string, input.cwd as string | undefined);
+    }
+
+    case "code_git": {
+      return await codeGit(input.action as string, input.message as string | undefined);
     }
 
     default:
