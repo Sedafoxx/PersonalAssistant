@@ -52,3 +52,28 @@ Notes:
   last ~40 turns are loaded with every request, so the assistant remembers the
   conversation across page reloads. Migration `0007_conversation_memory.sql`
   adds the `client_id` column (`npm run migrate`).
+
+## Coding agent (chat → it builds code)
+
+Your assistant can act as a coding agent: read/edit files, run commands, and
+commit/push to git. Because Vercel is serverless (no filesystem/shell), the
+actual work runs in a small local **worker** where the repo lives — your
+Codespace or laptop.
+
+- `npm run agent` starts the worker ([`scripts/coding-agent-server.mjs`](scripts/coding-agent-server.mjs))
+  on `127.0.0.1:8787`, protected by `CODING_AGENT_TOKEN`.
+- The assistant's `code_*` tools (`code_read_file`, `code_write_file`,
+  `code_list_dir`, `code_run_command`, `code_git`) talk to it via
+  `CODING_AGENT_URL`.
+- Chat with the assistant in the app **running locally / in the Codespace** and
+  ask it to build or change something — it edits files, verifies, and commits.
+
+Env (in `.env.local`, same machine as the worker):
+- `CODING_AGENT_URL=http://127.0.0.1:8787`
+- `CODING_AGENT_TOKEN=<any secret>`
+
+Test: `npm run agent` in one terminal, `npm run agent:test` in another.
+
+Security: the worker can run arbitrary commands and edit files on the machine
+it runs on — only run it on machines you trust, and keep the token secret. On
+the deployed Vercel app (no worker), the tools simply report they're unavailable.

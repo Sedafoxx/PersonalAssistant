@@ -13,6 +13,7 @@
     "ask:smoke": "node --env-file=.env.local --import tsx scripts/alexa-smoke.ts",
     "ask:features": "node --env-file=.env.local --import tsx scripts/feature-test.ts",
     "agent": "node scripts/coding-agent-server.mjs",
+    "agent:test": "node --env-file=.env.local --import tsx scripts/agent-test.ts",
     "ask:deploy": "npm run ask:prepare && ask deploy"
   },
   "dependencies": {

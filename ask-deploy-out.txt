@@ -1,0 +1,29 @@
+
+> personal-assistant@0.1.0 ask:deploy
+> npm run ask:prepare && ask deploy
+
+
+> personal-assistant@0.1.0 ask:prepare
+> node --env-file=.env.local scripts/prepare-skill.mjs
+
+skill.json endpoint: https://personal-assistant-dp8kvfdqw-sedafoxxs-projects.vercel.app/api/alexa -> https://personal-assistant-em91iigea-sedafoxxs-projects.vercel.app/api/alexa
+Deploy configuration loaded from ask-resources.json
+Deploy project for profile [default]
+
+==================== Deploy Skill Metadata ====================
+Uploading the entire skill package and building the models. Normally it takes a few minutes...
+[15:20:07] Retrieving skill id... [started]
+[15:20:07] Retrieving import id... [started]
+[15:20:07] [Interaction Model] Import model builder task. [started]
+[15:20:07] Using pre-existing skill id: amzn1.ask.skill.9b6fd15f-1d04-45be-9870-71c4b6873864 [title changed]
+[15:20:07] Using pre-existing skill id: amzn1.ask.skill.9b6fd15f-1d04-45be-9870-71c4b6873864 [completed]
+[15:20:11] Importing skill using import id: amzn1.ask-package.import.b08c0453-2dc4-411b-a95a-7a35a9419f26 [title changed]
+[15:20:11] Importing skill using import id: amzn1.ask-package.import.b08c0453-2dc4-411b-a95a-7a35a9419f26 [completed]
+[15:21:06] [Interaction Model] build is complete. [title changed]
+[15:21:06] [Interaction Model] build is complete. [completed]
+Skill package deployed and all models built successfully.
+Skill ID: amzn1.ask.skill.9b6fd15f-1d04-45be-9870-71c4b6873864
+
+==================== Enable Skill ====================
+The skill is already enabled, skipping skill enablement.
+
