@@ -24,3 +24,10 @@ graphify-out/
 
 # coding-agent scratch test dir
 .agent-test/
+
+# temp test/log files
+ask-deploy-out.txt
+smoke-out.txt
+live-test-out.txt
+live-search-out.txt
+.env.vercel.pulled
