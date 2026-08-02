@@ -9,17 +9,22 @@ import { STAT_KEYS, type StatKey, type Stats } from "./stats";
 export { STAT_KEYS };
 export type { StatKey, Stats };
 
-// Lazy-init: never construct the OpenAI client at module load. If this module
-// is ever pulled into the client bundle, importing it won't throw on the
-// missing (server-only) OPENAI_API_KEY — only calling enrich() would.
+// The journal brain uses the same OpenAI-compatible config as the chat brain
+// (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL), so it follows the DeepSeek switch.
 let _client: OpenAI | null = null;
-function openai(): OpenAI {
-  if (!_client) _client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function llm(): OpenAI {
+  if (!_client) {
+    _client = new OpenAI({
+      apiKey: process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY,
+      baseURL: process.env.LLM_BASE_URL || undefined,
+    });
+  }
   return _client;
 }
+const MODEL = process.env.LLM_MODEL ?? "gpt-4o";
 
 const JOURNAL_COLS =
-  "id,raw_text,summary,mood,sentiment,topics,stats,xp,created_at";
+  "id,raw_text,summary,mood,sentiment,topics,categories,stats,xp,created_at";
 
 export interface JournalEntry {
   id: string;
@@ -28,6 +33,7 @@ export interface JournalEntry {
   mood: string | null;
   sentiment: number | null;
   topics: string[];
+  categories: string[];
   stats: Stats;
   xp: number;
   created_at: string;
@@ -43,6 +49,69 @@ export interface LifeStats {
   entryCount: number;
   tasksXp: number; // XP earned from completed todos (subset of totalXp)
   tasksCompleted: number;
+}
+
+// --- life categories --------------------------------------------------------
+
+export interface Category {
+  id: string;
+  name: string;
+  description: string | null;
+  is_auto: boolean;
+}
+
+export async function getCategories(): Promise<Category[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("journal_categories")
+    .select("id,name,description,is_auto")
+    .order("name", { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Category[];
+}
+
+export async function createCategory(
+  name: string,
+  description?: string
+): Promise<Category> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("journal_categories")
+    .insert({ name: name.trim(), description: description ?? null, is_auto: true })
+    .select("id,name,description,is_auto")
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return data as Category;
+}
+
+// --- long-term memories -----------------------------------------------------
+
+export interface Memory {
+  id: string;
+  text: string;
+  category: string | null;
+  created_at: string;
+}
+
+export async function getMemories(limit = 50): Promise<Memory[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("journal_memories")
+    .select("id,text,category,created_at")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+  return (data ?? []) as Memory[];
+}
+
+export async function addMemory(text: string, category?: string | null): Promise<void> {
+  const db = createServiceClient();
+  const clean = text.trim();
+  if (!clean) return;
+  const { error } = await db
+    .from("journal_memories")
+    .insert({ text: clean, category: category ?? null });
+  if (error) throw new Error(error.message);
 }
 
 // --- gamification math -----------------------------------------------------
@@ -90,7 +159,7 @@ export function computeStreak(dates: string[]): number {
   return streak;
 }
 
-// --- GPT enrichment --------------------------------------------------------
+// --- AI enrichment (summary, mood, stats, categories, memories) -------------
 
 interface Enrichment {
   summary: string;
@@ -99,6 +168,9 @@ interface Enrichment {
   topics: string[];
   stats: Stats;
   advancedGoals: string[]; // titles of goals this entry shows progress toward
+  categories: string[]; // chosen from the provided category list
+  suggestedNewCategory: string | null; // new category to auto-create if one is emerging
+  memories: { text: string; category: string | null }[]; // long-term notes to save
 }
 
 const ENRICH_SYSTEM = `You analyze a personal journal entry and return structured JSON.
@@ -109,11 +181,16 @@ Return ONLY a JSON object with these keys:
 - "topics": array of 1-5 short lowercase topic tags.
 - "stats": object scoring how much this entry reflects effort/progress in each life area, each 0-3 (0 = not mentioned). Keys: health, focus, social, creativity, discipline.
 - "advanced_goals": array of goal titles (chosen ONLY from the provided active-goals list) that this entry shows concrete progress toward. Empty array if none clearly advanced. Match exact titles from the list.
-Be conservative — only award stat points and goal progress when the entry clearly shows activity.`;
+- "categories": array of 1-3 category names chosen ONLY from the provided category list that best fit this entry.
+- "suggested_new_category": if this entry keeps returning to a recurring theme that is NOT covered by the provided categories, suggest ONE short new category name (e.g. "Personal Projects"). Otherwise null.
+- "memories": array of 0-3 short long-term memory notes worth remembering about this person's life (people, situations, patterns, decisions). Each object: {"text": "...", "category": <one of the provided categories, or null>}.
+Be conservative — only award stat points, goal progress, and new categories when the entry clearly warrants it.`;
 
 export async function enrich(
   text: string,
-  goalTitles: string[] = []
+  goalTitles: string[] = [],
+  categoryNames: string[] = [],
+  memoryContext: string[] = []
 ): Promise<Enrichment> {
   const goalContext =
     goalTitles.length > 0
@@ -121,18 +198,30 @@ export async function enrich(
           .map((t) => `- ${t}`)
           .join("\n")}`
       : "\n\nNo active goals — return [] for advanced_goals.";
+  const catContext =
+    categoryNames.length > 0
+      ? `\n\nLife categories (choose categories ONLY from these): ${categoryNames.join(", ")}`
+      : "\n\nNo categories yet — return [] for categories.";
+  const memContext =
+    memoryContext.length > 0
+      ? `\n\nLong-term memories so far:\n${memoryContext.map((m) => `- ${m}`).join("\n")}`
+      : "\n\nNo long-term memories yet.";
 
-  const res = await openai().chat.completions.create({
-    model: "gpt-4o",
+  const res = await llm().chat.completions.create({
+    model: MODEL,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: ENRICH_SYSTEM + goalContext },
+      {
+        role: "system",
+        content: ENRICH_SYSTEM + goalContext + catContext + memContext,
+      },
       { role: "user", content: text.slice(0, 8000) },
     ],
   });
   const raw = res.choices[0].message.content ?? "{}";
   const parsed = JSON.parse(raw) as Partial<Enrichment> & {
     advanced_goals?: string[];
+    suggested_new_category?: string | null;
   };
   const stats: Stats = {};
   for (const k of STAT_KEYS) {
@@ -142,6 +231,23 @@ export async function enrich(
   const advancedGoals = Array.isArray(parsed.advanced_goals)
     ? parsed.advanced_goals.filter((t) => goalTitles.includes(t))
     : [];
+  const categories = Array.isArray(parsed.categories)
+    ? parsed.categories.filter((c) => categoryNames.includes(c)).slice(0, 3)
+    : [];
+  const suggestedNewCategory =
+    typeof parsed.suggested_new_category === "string" &&
+    parsed.suggested_new_category.trim().length > 0
+      ? parsed.suggested_new_category.trim().slice(0, 60)
+      : null;
+  const memories = Array.isArray(parsed.memories)
+    ? parsed.memories
+        .slice(0, 3)
+        .map((m) => ({
+          text: String(m?.text ?? "").trim().slice(0, 500),
+          category: m?.category && typeof m.category === "string" ? m.category : null,
+        }))
+        .filter((m) => m.text.length > 0)
+    : [];
   return {
     summary: parsed.summary ?? "",
     mood: parsed.mood ?? "",
@@ -149,7 +255,88 @@ export async function enrich(
     topics: Array.isArray(parsed.topics) ? parsed.topics.slice(0, 5) : [],
     stats,
     advancedGoals,
+    categories,
+    suggestedNewCategory,
+    memories,
   };
+}
+
+// --- guided reflection ------------------------------------------------------
+
+const REFLECT_SYSTEM = `You are the user's warm, casual reflection partner in a journaling app — a thoughtful friend, not a therapist. Never clinical, never over-medicalizing.
+
+The user writes journal entries and you help them reflect on where they are in life, one question at a time, filling out their "life status" across categories (Health, Work, Relationships, Money, Personal Growth, Fun & Leisure, and any that emerged).
+
+Rules:
+- If the conversation just started, greet warmly and ask ONE short, human follow-up question about the entry to help them go deeper (e.g. what's behind it, how it's affecting them, what they'd want to change).
+- As the conversation continues, briefly reflect back in one sentence, then ask exactly ONE next question. Never ask more than one question per reply.
+- Weave in their goals and what you remember about them when relevant.
+- Keep each reply to 1-3 sentences. Warm, casual, real — like a good friend.
+- If the user shares something worth remembering long-term, capture it as a memory.
+
+Return ONLY JSON: {"reply": "...", "memory": {"text": "...", "category": <category name or null>} | null}`;
+
+export interface ReflectResult {
+  reply: string;
+  memory: { text: string; category: string | null } | null;
+}
+
+export async function reflect(
+  entryText: string,
+  opts: {
+    categories: string[];
+    memories: string[];
+    goals: string[];
+    history: { role: "user" | "assistant"; content: string }[];
+  }
+): Promise<ReflectResult> {
+  const context = [
+    `The user's latest journal entry:\n${entryText.slice(0, 4000)}`,
+    opts.categories.length
+      ? `Life categories: ${opts.categories.join(", ")}`
+      : "",
+    opts.goals.length ? `Their active goals: ${opts.goals.join(", ")}` : "",
+    opts.memories.length
+      ? `What you remember about them:\n${opts.memories
+          .map((m) => `- ${m}`)
+          .join("\n")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const messages: OpenAI.ChatCompletionMessageParam[] = [
+    { role: "system", content: REFLECT_SYSTEM },
+    { role: "user", content: context },
+    ...opts.history.map((h) => ({
+      role: h.role as "user" | "assistant",
+      content: h.content,
+    })),
+  ];
+
+  const res = await llm().chat.completions.create({
+    model: MODEL,
+    response_format: { type: "json_object" },
+    messages,
+  });
+  const raw = res.choices[0].message.content ?? "{}";
+  try {
+    const parsed = JSON.parse(raw) as Partial<ReflectResult>;
+    const reply = (parsed.reply ?? "").trim();
+    const memory =
+      parsed.memory && typeof parsed.memory === "object" && parsed.memory.text
+        ? {
+            text: String(parsed.memory.text).trim().slice(0, 500),
+            category: parsed.memory.category && typeof parsed.memory.category === "string"
+              ? parsed.memory.category
+              : null,
+          }
+        : null;
+    return { reply: reply || "Want to tell me more about that?", memory };
+  } catch {
+    // Non-JSON fallback: treat the whole output as the reply.
+    return { reply: raw.trim().slice(0, 2000) || "Tell me more?", memory: null };
+  }
 }
 
 // --- db --------------------------------------------------------------------
@@ -157,6 +344,7 @@ export async function enrich(
 export interface CreateEntryResult {
   entry: JournalEntry;
   advancedGoals: Goal[]; // goals whose progress was bumped by this entry
+  newCategory?: Category; // category the AI auto-created, if any
 }
 
 export async function createJournalEntry(
@@ -164,13 +352,37 @@ export async function createJournalEntry(
 ): Promise<CreateEntryResult> {
   const db = createServiceClient();
 
-  const activeGoals = await getGoals("active");
+  const [activeGoals, categories, memories] = await Promise.all([
+    getGoals("active"),
+    getCategories(),
+    getMemories(50),
+  ]);
   const e = await enrich(
     rawText,
-    activeGoals.map((g) => g.title)
+    activeGoals.map((g) => g.title),
+    categories.map((c) => c.name),
+    memories.map((m) => m.text)
   );
   const xp = xpForEntry(e.stats);
   const embedding = await embed(`${rawText}\n${e.summary}`);
+
+  // Auto-create a new category if one is clearly emerging and not yet present.
+  let newCategory: Category | undefined;
+  let finalCategories = e.categories;
+  if (e.suggestedNewCategory) {
+    const name = e.suggestedNewCategory.trim();
+    if (
+      name &&
+      !categories.some((c) => c.name.toLowerCase() === name.toLowerCase())
+    ) {
+      try {
+        newCategory = await createCategory(name, "Auto-created by the journal AI");
+        finalCategories = [...finalCategories, name];
+      } catch {
+        // category race / duplicate — non-fatal
+      }
+    }
+  }
 
   const { data, error } = await db
     .from("journal_entries")
@@ -180,6 +392,7 @@ export async function createJournalEntry(
       mood: e.mood,
       sentiment: e.sentiment,
       topics: e.topics,
+      categories: finalCategories,
       stats: e.stats,
       xp,
       embedding,
@@ -187,6 +400,15 @@ export async function createJournalEntry(
     .select(JOURNAL_COLS)
     .single();
   if (error) throw new Error(error.message);
+
+  // Save long-term memories the AI surfaced from this entry.
+  for (const m of e.memories) {
+    try {
+      await addMemory(m.text, m.category);
+    } catch {
+      // non-fatal
+    }
+  }
 
   // Bump progress on any goal the entry advanced.
   const advancedGoals: Goal[] = [];
@@ -200,7 +422,7 @@ export async function createJournalEntry(
     }
   }
 
-  return { entry: data as JournalEntry, advancedGoals };
+  return { entry: data as JournalEntry, advancedGoals, newCategory };
 }
 
 export async function getJournalEntries(limit = 50): Promise<JournalEntry[]> {

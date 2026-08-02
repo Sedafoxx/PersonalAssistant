@@ -3,17 +3,21 @@ import {
   createJournalEntry,
   getJournalEntries,
   getLifeStats,
+  getCategories,
+  getMemories,
 } from "@/lib/journal";
 import { getGoals } from "@/lib/goals";
 
 export async function GET() {
   try {
-    const [entries, stats, goals] = await Promise.all([
+    const [entries, stats, goals, categories, memories] = await Promise.all([
       getJournalEntries(),
       getLifeStats(),
       getGoals("active"),
+      getCategories(),
+      getMemories(),
     ]);
-    return NextResponse.json({ entries, stats, goals });
+    return NextResponse.json({ entries, stats, goals, categories, memories });
   } catch (err) {
     console.error("journal GET error", err);
     return NextResponse.json({ error: "Failed to load journal" }, { status: 500 });
@@ -26,9 +30,11 @@ export async function POST(req: NextRequest) {
     if (!text || !text.trim()) {
       return NextResponse.json({ error: "Empty entry" }, { status: 400 });
     }
-    const { entry, advancedGoals } = await createJournalEntry(text.trim());
-    const stats = await getLifeStats();
-    return NextResponse.json({ entry, stats, advancedGoals });
+    const { entry, advancedGoals, newCategory } = await createJournalEntry(
+      text.trim()
+    );
+    const [stats, categories] = await Promise.all([getLifeStats(), getCategories()]);
+    return NextResponse.json({ entry, stats, advancedGoals, newCategory, categories });
   } catch (err) {
     console.error("journal POST error", err);
     return NextResponse.json({ error: "Failed to save entry" }, { status: 500 });
