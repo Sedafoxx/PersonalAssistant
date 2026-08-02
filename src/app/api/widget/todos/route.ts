@@ -55,6 +55,40 @@ export async function GET(req: NextRequest) {
       });
     }
 
+    if (format === "html") {
+      // Pretty, mobile-friendly page for a simple WebView home-screen widget —
+      // no KWGT formulas required. Titles are escaped to keep it safe.
+      const esc = (s: string) =>
+        s.replace(/[&<>"]/g, (c) => {
+          const entity: Record<string, string> = {
+            "&": "amp;",
+            "<": "lt;",
+            ">": "gt;",
+            '"': "quot;",
+          };
+          return "&" + entity[c];
+        });
+      const rows = items
+        .map((it, i) => {
+          let due = "";
+          if (it.due_date) {
+            const d = new Date(it.due_date);
+            if (!Number.isNaN(d.getTime())) {
+              due = ` (${d.toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+              })})`;
+            }
+          }
+          return `<li style="display:flex;gap:10px;align-items:baseline;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.06)"><span style="color:#6366f1;font-weight:700;flex:0 0 auto">${i + 1}</span><span style="color:#e5e7eb;font-size:15px;line-height:1.45;word-break:break-word">${esc(it.title)}${due ? `<span style="color:#9ca3af;font-size:12px">${esc(due)}</span>` : ""}</span></li>`;
+        })
+        .join("");
+      const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Personal Assistant — Todos</title></head><body style="margin:0;background:#0f0f0f;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:16px;color:#e5e7eb"><div style="max-width:560px;margin:0 auto"><h1 style="font-size:15px;font-weight:700;color:#fff;margin:0 0 2px">Personal Assistant</h1><p style="margin:0 0 8px;color:#9ca3af;font-size:13px">${items.length} open todo${items.length === 1 ? "" : "s"}</p><ul style="list-style:none;margin:0;padding:0">${rows || "<li style='color:#6b7280;font-size:14px'>All done 🎉</li>"}</ul></div></body></html>`;
+      return new NextResponse(html, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
     return NextResponse.json({
       fetched_at: new Date().toISOString(),
       count: items.length,

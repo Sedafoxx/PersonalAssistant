@@ -54,8 +54,7 @@ You should see plain text like:
    $wg("https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN")$
    ```
 
-   (Keep the URL free of `&` — the endpoint returns text by default, and a `&`
-   in the URL can trip KWGT's formula parser with "invalid argument count".)
+   (The URL has no `&` — the endpoint returns text by default.)
 
 5. Style it:
    - **Font size** ~16–20sp, **line spacing** a bit larger than default.
@@ -64,9 +63,30 @@ You should see plain text like:
      rounded corners ~20).
 6. Tap the **✓** (apply) in the top-right to save. It should now show your todos.
 
-> **If it shows `...` or nothing:** the web-fetch function `$wg()$` needs the
-> small **one-time KWGT Pro** unlock (Play Store in-app, ~$2, still no Tasker).
-> That's the only case where the free tier falls short.
+> **If you get "invalid argument count" or it shows `...`:** your KWGT build
+> either wants the `wu()` variant (try `$wu("...")$` instead of `$wg(...)$`),
+> or web-fetch is gated behind the small one-time **KWGT Pro** unlock (~$2,
+> still no Tasker). If KWGT keeps fighting you, skip it — the **WebView
+> fallback** below needs no formulas and is fully free.
+
+## Alternative — WebView widget (free, no KWGT formulas)
+
+If KWGT's web-fetch is being difficult, use a plain WebView-widget app instead
+(any free one, e.g. "WebView Widget" on the Play Store).
+
+1. Install a free WebView-widget app and add its widget to your home screen.
+2. Set the widget's URL to the pretty HTML page:
+   ```
+   https://personal-assistant-two-pi.vercel.app/api/widget/todos?token=YOUR_TOKEN&format=html
+   ```
+   (The `&` is fine in a WebView URL — it's only KWGT's formula parser that
+   chokes on it.)
+3. It renders a dark, app-styled list of your todos (numbered, with due dates)
+   and refreshes on Android's schedule. If the widget app supports it, set the
+   tap action to open the app:
+   ```
+   https://personal-assistant-two-pi.vercel.app
+   ```
 
 ## Step 4 — Refresh
 
