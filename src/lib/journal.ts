@@ -305,13 +305,23 @@ export async function reflect(
     .filter(Boolean)
     .join("\n\n");
 
+  // DeepSeek's json_object mode can return whitespace-only content when the
+  // request ends on a user turn that directly follows an assistant turn. To
+  // avoid that, embed the running conversation as a transcript inside the
+  // single user context message instead of passing separate chat turns.
+  let userContent = context;
+  if (opts.history.length > 0) {
+    const transcript = opts.history
+      .map((h) =>
+        h.role === "assistant" ? `You said: ${h.content}` : `The user said: ${h.content}`
+      )
+      .join("\n");
+    userContent += `\n\nConversation so far:\n${transcript}\n\nContinue the conversation — ask your next question in JSON.`;
+  }
+
   const messages: OpenAI.ChatCompletionMessageParam[] = [
     { role: "system", content: REFLECT_SYSTEM },
-    { role: "user", content: context },
-    ...opts.history.map((h) => ({
-      role: h.role as "user" | "assistant",
-      content: h.content,
-    })),
+    { role: "user", content: userContent },
   ];
 
   const res = await llm().chat.completions.create({
@@ -319,7 +329,7 @@ export async function reflect(
     response_format: { type: "json_object" },
     messages,
   });
-  const raw = res.choices[0].message.content ?? "{}";
+  const raw = (res.choices[0].message.content ?? "").trim();
   try {
     const parsed = JSON.parse(raw) as Partial<ReflectResult>;
     const reply = (parsed.reply ?? "").trim();
@@ -335,7 +345,7 @@ export async function reflect(
     return { reply: reply || "Want to tell me more about that?", memory };
   } catch {
     // Non-JSON fallback: treat the whole output as the reply.
-    return { reply: raw.trim().slice(0, 2000) || "Tell me more?", memory: null };
+    return { reply: raw.slice(0, 2000) || "Tell me more?", memory: null };
   }
 }
 
