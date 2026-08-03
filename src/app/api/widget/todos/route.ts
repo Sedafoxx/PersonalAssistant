@@ -8,7 +8,7 @@ import { getItems } from "@/lib/db";
 //   Text is the default (the KWGT widget fetches with $wg()$ and displays it
 //   directly — no parsing needed). Pass ?format=json for a structured payload.
 //
-// Items are active (open) todos/notes/ideas, highest priority first.
+// Items are active (open) todos only (no ideas/notes), highest priority first.
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token") ?? "";
   const expected = process.env.WIDGET_TOKEN;
@@ -19,7 +19,7 @@ export async function GET(req: NextRequest) {
   const format = req.nextUrl.searchParams.get("format") ?? "text";
 
   try {
-    const all = await getItems({ status: "active" });
+    const all = await getItems({ status: "active", type: "todo" });
     const items = all
       .slice()
       .sort((a, b) => {
