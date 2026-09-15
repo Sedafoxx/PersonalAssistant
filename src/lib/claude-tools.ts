@@ -15,6 +15,24 @@ import {
   type GoalStatus,
 } from "./goals";
 import {
+  addDayTask,
+  carryOver,
+  dropTask,
+  pullIntoDay,
+  listLeftovers,
+  localDay,
+  isDayString,
+  getDay,
+} from "./day";
+import {
+  getMilestones,
+  getMilestonesByGoal,
+  createMilestone,
+  toggleMilestone,
+  type Milestone,
+} from "./milestones";
+import { getReflection, upsertReflection } from "./reflection";
+import {
   getList,
   addToList,
   removeFromList,
@@ -35,6 +53,12 @@ import {
   codeRunCommand,
   codeGit,
 } from "./coding-agent";
+import {
+  upsertFact,
+  getTopics,
+  getActiveFacts,
+  setFactStatus,
+} from "./memory";
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
   {
@@ -504,6 +528,219 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "add_day_task",
+      description:
+        "Add a small task to the user's plan for TODAY (the 'Today' window). Use when planning the day or when the user agrees to a concrete next step. Each task should be small and tied to one of their milestones when possible.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short, concrete task title." },
+          time: {
+            type: "string",
+            description: "Optional local time of day, e.g. '07:30'.",
+          },
+          priority: {
+            type: "number",
+            description: "Priority 1-5 where 1 is highest. Default 3.",
+          },
+          required: {
+            type: "boolean",
+            description:
+              "True if this task is needed today, false if optional. Default true.",
+          },
+          goal: {
+            type: "string",
+            description:
+              "Optional goal TITLE this task advances (e.g. 'Run a half marathon'). Resolved to the goal automatically.",
+          },
+          milestone: {
+            type: "string",
+            description:
+              "Optional milestone TITLE this task advances (a real step inside a goal). Resolved to the milestone automatically; prefer this over goal when the task maps to a specific step.",
+          },
+        },
+        required: ["title"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "triage_day_task",
+      description:
+        "Resolve a leftover task from a previous day, one at a time. action 'carry' moves it onto today, 'reschedule' moves it to a future date, 'drop' archives it (never deletes). Identify the task by id, or by title (it is looked up in today's plan, then in the leftovers). Some leftovers expire — a missed morning workout cannot be recovered, so dropping it is often the honest choice.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The task's item UUID, if you have it." },
+          title: {
+            type: "string",
+            description:
+              "The task title to look up in the current day, then among leftovers.",
+          },
+          action: {
+            type: "string",
+            enum: ["carry", "drop", "reschedule"],
+            description: "What to do with the task.",
+          },
+          date: {
+            type: "string",
+            description:
+              "For action 'reschedule': the target local day 'YYYY-MM-DD'. Defaults to today for 'carry'.",
+          },
+        },
+        required: ["action"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_milestones",
+      description:
+        "List a goal's milestones, or the milestones of every active goal grouped by goal. Use when the user asks about milestones or steps toward a goal.",
+      parameters: {
+        type: "object",
+        properties: {
+          goal: {
+            type: "string",
+            description:
+              "Optional goal TITLE to scope to one goal. Omit to group across active goals.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_milestone",
+      description:
+        "Add a milestone (a real ordered step) to one of the user's goals. Adding milestones switches the goal's progress to be derived from them.",
+      parameters: {
+        type: "object",
+        properties: {
+          goal: { type: "string", description: "The goal TITLE to add the milestone to." },
+          title: { type: "string", description: "Short milestone title." },
+          target_date: {
+            type: "string",
+            description: "Optional target day 'YYYY-MM-DD'.",
+          },
+        },
+        required: ["goal", "title"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "complete_milestone",
+      description:
+        "Mark a milestone done (or undone). Identify it by id, or by title together with its goal title. With only a title, the goal's milestones are listed first so you can disambiguate.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The milestone UUID, if you have it." },
+          title: { type: "string", description: "The milestone title." },
+          goal: {
+            type: "string",
+            description: "The goal TITLE the milestone belongs to (helps disambiguate).",
+          },
+          done: {
+            type: "boolean",
+            description: "Default true (mark done). Set false to un-complete.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "save_reflection",
+      description:
+        "Save the user's evening reflection for today, so it appears in their Reflection tab. Only pass the fields the user actually gave; empty values never overwrite existing ones.",
+      parameters: {
+        type: "object",
+        properties: {
+          went_well: { type: "string", description: "What went well today." },
+          could_improve: { type: "string", description: "What could improve." },
+          mood: {
+            type: "string",
+            description: "Optional short mood note that is folded into the reflection.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "remember_fact",
+      description:
+        "Remember a durable fact about the user, keeping it current. Use when the user tells you something worth recalling long-term (a preference, a person, a routine, a constraint). Facts live under a topic and are keyed: writing the same topic+key again UPDATES the value instead of piling up duplicate rows, so it is always safe to call when something changes. You may add and update facts; you can never delete them.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: {
+            type: "string",
+            description: "Topic bucket, e.g. the area of life this belongs to (Küche, Health, Work).",
+          },
+          key: {
+            type: "string",
+            description: "Short attribute name, e.g. favourite cuisine.",
+          },
+          value: {
+            type: "string",
+            description: "The current value to remember.",
+          },
+        },
+        required: ["topic", "key", "value"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_memory",
+      description:
+        "Show what the coach currently remembers. With no topic, list the topics and how many active facts each holds; with a topic, list that topic as key: value lines. Use when the user asks what you know or remember about them.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: {
+            type: "string",
+            description: "Optional topic to list in detail. Omit to show all topics with counts.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "forget_fact",
+      description:
+        "Propose removing one remembered fact. This does NOT delete anything: it flags the fact as pending removal and the user must confirm the removal in the Coach tab. Use only when the user asks you to forget something.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: {
+            type: "string",
+            description: "The topic the fact belongs to.",
+          },
+          key: {
+            type: "string",
+            description: "The key of the fact to propose for removal.",
+          },
+        },
+        required: ["topic", "key"],
+      },
+    },
+  },
 ];
 
 export async function executeTool(
@@ -690,6 +927,384 @@ export async function executeTool(
 
     case "code_git": {
       return await codeGit(input.action as string, input.message as string | undefined);
+    }
+
+    case "add_day_task": {
+      const goalTitle = input.goal as string | undefined;
+      let goalId: string | undefined;
+      if (goalTitle) {
+        const goals = await getGoals("active");
+        const match = goals.find(
+          (g) => g.title.toLowerCase() === goalTitle.toLowerCase()
+        ) ??
+          goals.find((g) =>
+            g.title.toLowerCase().includes(goalTitle.toLowerCase())
+          );
+        if (!match) {
+          return JSON.stringify({
+            error: `No active goal matching "${goalTitle}". Call list_goals to see the real titles.`,
+          });
+        }
+        goalId = match.id;
+      }
+      const milestoneTitle = input.milestone as string | undefined;
+      let milestoneId: string | undefined;
+      if (milestoneTitle) {
+        // Search the named goal's milestones first, else every active goal's.
+        const needle = milestoneTitle.toLowerCase();
+        const scopeGoalIds = goalId
+          ? [goalId]
+          : (await getGoals("active")).map((g) => g.id);
+        const grouped = await getMilestonesByGoal(scopeGoalIds);
+        const candidates = scopeGoalIds.flatMap((gid) =>
+          (grouped[gid] ?? []).filter(
+            (m) =>
+              m.title.toLowerCase() === needle ||
+              m.title.toLowerCase().includes(needle)
+          )
+        );
+        if (candidates.length === 0) {
+          return JSON.stringify({
+            error: `No milestone matching "${milestoneTitle}". Call list_milestones to see the real titles.`,
+          });
+        }
+        if (candidates.length > 1) {
+          return JSON.stringify({
+            error: `"${milestoneTitle}" matches several milestones — pass the goal too.`,
+            matches: candidates.map((m) => m.title),
+          });
+        }
+        milestoneId = candidates[0].id;
+        // A milestone implies its goal — derive it so the two never disagree.
+        goalId = candidates[0].goal_id;
+      }
+      const item = await addDayTask({
+        title: input.title as string,
+        priority: input.priority as number | undefined,
+        required: input.required as boolean | undefined,
+        planned_time: input.time as string | undefined,
+        goal_id: goalId,
+        milestone_id: milestoneId,
+      });
+      return JSON.stringify({ success: true, task: item });
+    }
+
+    case "triage_day_task": {
+      const action = input.action as string;
+      if (action !== "carry" && action !== "drop" && action !== "reschedule") {
+        return JSON.stringify({
+          error: `Unknown action "${action}" — use carry, drop or reschedule.`,
+        });
+      }
+
+      let id = input.id as string | undefined;
+      let found: { id: string; title: string; planned_for: string | null } | undefined;
+
+      if (!id) {
+        const title = input.title as string | undefined;
+        if (!title) {
+          return JSON.stringify({
+            error: "Provide either an id or a title to triage.",
+          });
+        }
+        const needle = title.toLowerCase();
+        const isMatch = (t: string) =>
+          t.toLowerCase() === needle || t.toLowerCase().includes(needle);
+
+        // Look in the current day first, then in the leftovers.
+        const dayView = await getDay();
+        const inDay = dayView.today.find((i) => isMatch(i.title));
+        if (inDay) {
+          id = inDay.id;
+          found = { id: inDay.id, title: inDay.title, planned_for: inDay.planned_for };
+        } else {
+          const leftovers = await listLeftovers();
+          const left = leftovers.find((i) => isMatch(i.title));
+          if (left) {
+            id = left.id;
+            found = { id: left.id, title: left.title, planned_for: left.planned_for };
+          }
+        }
+
+        if (!id) {
+          return JSON.stringify({
+            error: `No task matching "${title}" in today's plan or the leftovers.`,
+          });
+        }
+      }
+
+      if (action === "carry") {
+        const item = await carryOver(id, isDayString(input.date) ? (input.date as string) : undefined);
+        return JSON.stringify({ success: true, carried: item });
+      }
+      if (action === "reschedule") {
+        if (!isDayString(input.date)) {
+          return JSON.stringify({
+            error: "Reschedule needs a target day 'YYYY-MM-DD'.",
+          });
+        }
+        const item = await pullIntoDay(id, input.date as string);
+        return JSON.stringify({ success: true, rescheduled: item });
+      }
+      await dropTask(id);
+      return JSON.stringify({
+        success: true,
+        dropped: found ?? { id },
+      });
+    }
+
+    case "list_milestones": {
+      const goalTitle = input.goal as string | undefined;
+      if (goalTitle) {
+        const goals = await getGoals();
+        const match = goals.find(
+          (g) => g.title.toLowerCase() === goalTitle.toLowerCase()
+        ) ?? goals.find((g) =>
+          g.title.toLowerCase().includes(goalTitle.toLowerCase())
+        );
+        if (!match) {
+          return JSON.stringify({
+            error: `No goal matching "${goalTitle}". Call list_goals to see the real titles.`,
+          });
+        }
+        const milestones = await getMilestones(match.id);
+        return JSON.stringify({ goal: match.title, milestones });
+      }
+
+      const goals = await getGoals("active");
+      const grouped = await getMilestonesByGoal(goals.map((g) => g.id));
+      const result = goals.map((g) => ({
+        goal: g.title,
+        milestones: grouped[g.id] ?? [],
+      }));
+      return JSON.stringify({ goals: result });
+    }
+
+    case "create_milestone": {
+      const goalTitle = input.goal as string;
+      const goals = await getGoals();
+      const match = goals.find(
+        (g) => g.title.toLowerCase() === goalTitle.toLowerCase()
+      ) ?? goals.find((g) =>
+        g.title.toLowerCase().includes(goalTitle.toLowerCase())
+      );
+      if (!match) {
+        return JSON.stringify({
+          error: `No goal matching "${goalTitle}". Call list_goals to see the real titles.`,
+        });
+      }
+      const milestone = await createMilestone({
+        goal_id: match.id,
+        title: input.title as string,
+        target_date: (input.target_date as string | undefined) ?? null,
+      });
+      return JSON.stringify({ success: true, goal: match.title, milestone });
+    }
+
+    case "complete_milestone": {
+      const done = (input.done as boolean | undefined) ?? true;
+      let id = input.id as string | undefined;
+
+      if (!id) {
+        const title = input.title as string | undefined;
+        if (!title) {
+          return JSON.stringify({
+            error: "Provide a milestone id, or a title (with its goal).",
+          });
+        }
+        const needle = title.toLowerCase();
+
+        let goalIds: { id: string; title: string }[] = [];
+        const goalTitle = input.goal as string | undefined;
+        if (goalTitle) {
+          const goals = await getGoals();
+          const match = goals.find(
+            (g) => g.title.toLowerCase() === goalTitle.toLowerCase()
+          ) ?? goals.find((g) =>
+            g.title.toLowerCase().includes(goalTitle.toLowerCase())
+          );
+          if (!match) {
+            return JSON.stringify({
+              error: `No goal matching "${goalTitle}". Call list_goals first.`,
+            });
+          }
+          goalIds = [{ id: match.id, title: match.title }];
+        } else {
+          const goals = await getGoals("active");
+          goalIds = goals.map((g) => ({ id: g.id, title: g.title }));
+        }
+
+        const grouped = await getMilestonesByGoal(goalIds.map((g) => g.id));
+        const candidates: { id: string; goal: string }[] = [];
+        for (const g of goalIds) {
+          for (const m of grouped[g.id] ?? []) {
+            if (
+              m.title.toLowerCase() === needle ||
+              m.title.toLowerCase().includes(needle)
+            ) {
+              candidates.push({ id: m.id, goal: g.title });
+            }
+          }
+        }
+
+        if (candidates.length === 0) {
+          const listing: { goal: string; milestones: Milestone[] }[] =
+            goalIds.map((g) => ({
+              goal: g.title,
+              milestones: grouped[g.id] ?? [],
+            }));
+          return JSON.stringify({
+            error: `No milestone matching "${title}".`,
+            milestones: listing,
+          });
+        }
+        if (candidates.length > 1 && !goalTitle) {
+          return JSON.stringify({
+            error: `"${title}" matches several milestones — say which goal.`,
+            matches: candidates,
+          });
+        }
+        id = candidates[0].id;
+      }
+
+      const milestone = await toggleMilestone(id, done);
+      return JSON.stringify({ success: true, milestone });
+    }
+
+    case "save_reflection": {
+      const day = localDay();
+      const wentWell = (input.went_well as string | undefined)?.trim();
+      const couldImprove = (input.could_improve as string | undefined)?.trim();
+      const mood = (input.mood as string | undefined)?.trim();
+
+      // Read the current record first so an empty field never clobbers a value
+      // the user already saved.
+      const existing = await getReflection(day);
+
+      // Merge mood into went_well when the user only offered a mood.
+      let nextWent: string | null = existing?.went_well ?? null;
+      if (wentWell) nextWent = wentWell;
+      if (mood) {
+        nextWent = nextWent ? nextWent + "\nMood: " + mood : "Mood: " + mood;
+      }
+
+      const nextImprove: string | null = couldImprove
+        ? couldImprove
+        : (existing?.could_improve ?? null);
+
+      const reflection = await upsertReflection({
+        day,
+        went_well: nextWent,
+        could_improve: nextImprove,
+      });
+      return reflection
+        ? "Saved your reflection for " + day + "."
+        : "Could not save the reflection - try again.";
+    }
+
+    case "remember_fact": {
+      const topic = (input.topic as string | undefined)?.trim();
+      const key = (input.key as string | undefined)?.trim();
+      const value = (input.value as string | undefined)?.trim();
+      if (!topic || !key || !value) {
+        return "Tell me the topic, key and value to remember.";
+      }
+
+      // Resolve the topic by name so we can name the value being replaced.
+      const topics = await getTopics();
+      const needle = topic.toLowerCase();
+      const match =
+        topics.find((t) => t.title.toLowerCase() === needle || t.slug === needle) ??
+        topics.find((t) => t.title.toLowerCase().includes(needle));
+      let oldValue: string | null = null;
+      if (match) {
+        const existing = await getActiveFacts(match.id);
+        const live = existing.find((f) => f.key.toLowerCase() === key.toLowerCase());
+        if (live) oldValue = live.value;
+      }
+
+      const result = await upsertFact({ topic, key, value });
+      if (!result.fact) {
+        return "I could not save that fact - please give a topic, key and value.";
+      }
+      if (!result.changed) {
+        if (result.fact.pinned && oldValue !== null && oldValue !== value) {
+          return "Already remembered as " + key + ": " + oldValue + ". It is pinned, so I left it as-is.";
+        }
+        return "Already had " + key + ": " + result.fact.value + " - nothing changed.";
+      }
+      if (oldValue !== null) {
+        return "Updated " + key + ": " + oldValue + " -> " + value + ".";
+      }
+      return "Saved " + key + ": " + value + " under " + topic + ".";
+    }
+
+    case "list_memory": {
+      const topicArg = (input.topic as string | undefined)?.trim();
+      const topics = await getTopics();
+      if (!topics.length) {
+        return "I am not maintaining any facts yet. Tell me something concrete and I will start keeping track.";
+      }
+
+      if (!topicArg) {
+        const facts = await getActiveFacts();
+        const lines = topics.map((t) => {
+          const n = facts.filter((f) => f.topic_id === t.id).length;
+          return "- " + t.title + " (" + n + (n === 1 ? " fact)" : " facts)");
+        });
+        return "Topics I keep current:\n" + lines.join("\n");
+      }
+
+      const needle = topicArg.toLowerCase();
+      const topic =
+        topics.find((t) => t.title.toLowerCase() === needle || t.slug === needle) ??
+        topics.find((t) => t.title.toLowerCase().includes(needle));
+      if (!topic) return "I have nothing filed under " + topicArg + " yet.";
+
+      const facts = await getActiveFacts(topic.id);
+      if (!facts.length) return topic.title + " has no live facts right now.";
+      const lines = facts.map(
+        (f) => "- " + f.key + ": " + f.value + (f.pinned ? " [pinned]" : "")
+      );
+      return (
+        topic.title +
+        (topic.summary ? "\n" + topic.summary : "") +
+        "\n" +
+        lines.join("\n")
+      );
+    }
+
+    case "forget_fact": {
+      const topicArg = (input.topic as string | undefined)?.trim();
+      const keyArg = (input.key as string | undefined)?.trim();
+      if (!topicArg || !keyArg) {
+        return "Tell me the topic and the key to propose for removal.";
+      }
+
+      // PROPOSE ONLY. This never deletes: the row is flagged for removal and the
+      // human confirms it in the Coach tab. The assistant must not erase facts
+      // on its own, because a wrong deletion is unrecoverable while a stale fact
+      // is merely corrected.
+      const topics = await getTopics();
+      const needle = topicArg.toLowerCase();
+      const topic =
+        topics.find((t) => t.title.toLowerCase() === needle || t.slug === needle) ??
+        topics.find((t) => t.title.toLowerCase().includes(needle));
+      if (!topic) return "I have nothing filed under " + topicArg + " to remove.";
+
+      const facts = await getActiveFacts(topic.id);
+      const live = facts.find((f) => f.key.toLowerCase() === keyArg.toLowerCase());
+      if (!live) {
+        return "There is no live fact for " + keyArg + " in " + topic.title + ".";
+      }
+      await setFactStatus(live.id, "pending_removal");
+      return (
+        "Proposed removing " +
+        live.key +
+        ": " +
+        live.value +
+        ". I do not delete facts on my own - confirm it in the Coach tab and it will go."
+      );
     }
 
     default:

@@ -263,13 +263,41 @@ export async function enrich(
 
 // --- guided reflection ------------------------------------------------------
 
-const REFLECT_SYSTEM = `You are the user's warm, casual reflection partner in a journaling app — a thoughtful friend, not a therapist. Never clinical, never over-medicalizing.
+export interface ReflectOpts {
+  categories: string[];
+  memories: string[];
+  goals: string[];
+  history: { role: "user" | "assistant"; content: string }[];
+  // Session opener context (the app asks first). When provided, the reflection
+  // starts a FRESH daily session instead of re-processing a previous one.
+  todayLabel?: string; // e.g. "Monday, 6 September"
+  todayEntries?: string[]; // short summaries of what was logged today
+}
 
-The user writes journal entries and you help them reflect on where they are in life, one question at a time, filling out their "life status" across categories (Health, Work, Relationships, Money, Personal Growth, Fun & Leisure, and any that emerged).
+// Fresh daily opener — used when a new reflection session starts (empty
+// history). It greets for the current day and asks today's first question. The
+// AI may use background memories/goals to "connect the dots", but it must NOT
+// act like it is mid-conversation or re-litigate past sessions.
+const REFLECT_OPEN_SYSTEM = `You are the user's warm, casual reflection partner in a journaling app — a thoughtful friend, not a therapist. Never clinical, never over-medicalizing.
+
+A NEW daily reflection session is starting. Treat it as a fresh start for the day — do NOT continue any earlier conversation or re-ask about old entries. You still remember the user's life areas, goals, and long-term memories, and you may weave them in as background to make the reflection feel personal ("connect the dots"), but the focus is TODAY.
 
 Rules:
-- If the conversation just started, greet warmly and ask ONE short, human follow-up question about the entry to help them go deeper (e.g. what's behind it, how it's affecting them, what they'd want to change).
-- As the conversation continues, briefly reflect back in one sentence, then ask exactly ONE next question. Never ask more than one question per reply.
+- If the user has already journaled today, greet warmly and open today's reflection by lightly reflecting back on what they wrote today, then ask ONE short follow-up to go a little deeper.
+- If they haven't journaled today yet, greet them for the day and ask ONE natural opening question to get the reflection going (e.g. how the day is going, what's on their mind right now, what they want to reflect on this evening).
+- Keep each reply to 1-3 sentences. Warm, casual, real — like a good friend. Ask exactly ONE question.
+- If the user shares something worth remembering long-term, capture it as a memory.
+
+Return ONLY JSON: {"reply": "...", "memory": {"text": "...", "category": <category name or null>} | null}`;
+
+// Continuation — used once the session already has messages. The transcript
+// keeps the thread going within the same session.
+const REFLECT_CONTINUE_SYSTEM = `You are the user's warm, casual reflection partner in a journaling app — a thoughtful friend, not a therapist. Never clinical, never over-medicalizing.
+
+The user is in the middle of today's reflection session. Keep it going naturally, one question at a time, helping them fill out their "life status" across categories (Health, Work, Relationships, Money, Personal Growth, Fun & Leisure, and any that emerged).
+
+Rules:
+- Briefly reflect back in one sentence, then ask exactly ONE next question. Never ask more than one question per reply.
 - Weave in their goals and what you remember about them when relevant.
 - Keep each reply to 1-3 sentences. Warm, casual, real — like a good friend.
 - If the user shares something worth remembering long-term, capture it as a memory.
@@ -283,15 +311,11 @@ export interface ReflectResult {
 
 export async function reflect(
   entryText: string,
-  opts: {
-    categories: string[];
-    memories: string[];
-    goals: string[];
-    history: { role: "user" | "assistant"; content: string }[];
-  }
+  opts: ReflectOpts
 ): Promise<ReflectResult> {
-  const context = [
-    `The user's latest journal entry:\n${entryText.slice(0, 4000)}`,
+  const isOpener = opts.history.length === 0;
+
+  const sharedCtx = [
     opts.categories.length
       ? `Life categories: ${opts.categories.join(", ")}`
       : "",
@@ -305,22 +329,35 @@ export async function reflect(
     .filter(Boolean)
     .join("\n\n");
 
-  // DeepSeek's json_object mode can return whitespace-only content when the
-  // request ends on a user turn that directly follows an assistant turn. To
-  // avoid that, embed the running conversation as a transcript inside the
-  // single user context message instead of passing separate chat turns.
-  let userContent = context;
-  if (opts.history.length > 0) {
+  let system = REFLECT_CONTINUE_SYSTEM;
+  let userContent: string;
+
+  if (isOpener) {
+    system = REFLECT_OPEN_SYSTEM;
+    const dayLine = opts.todayLabel ? `Today is ${opts.todayLabel}.` : "";
+    const todayCtx =
+      opts.todayEntries && opts.todayEntries.length > 0
+        ? `What the user logged today:\n${opts.todayEntries
+            .map((e) => `- ${e.slice(0, 500)}`)
+            .join("\n")}`
+        : "The user has not logged anything today yet.";
+    userContent = [dayLine, todayCtx, sharedCtx].filter(Boolean).join("\n\n");
+  } else {
+    const historyCtx = `The user's latest journal entry:\n${entryText.slice(0, 4000)}`;
+    // DeepSeek's json_object mode can return whitespace-only content when the
+    // request ends on a user turn that directly follows an assistant turn. To
+    // avoid that, embed the running conversation as a transcript inside the
+    // single user context message instead of passing separate chat turns.
     const transcript = opts.history
       .map((h) =>
         h.role === "assistant" ? `You said: ${h.content}` : `The user said: ${h.content}`
       )
       .join("\n");
-    userContent += `\n\nConversation so far:\n${transcript}\n\nContinue the conversation — ask your next question in JSON.`;
+    userContent = `${historyCtx}\n\n${sharedCtx}\n\nConversation so far:\n${transcript}\n\nContinue the conversation — ask your next question in JSON.`;
   }
 
   const messages: OpenAI.ChatCompletionMessageParam[] = [
-    { role: "system", content: REFLECT_SYSTEM },
+    { role: "system", content: system },
     { role: "user", content: userContent },
   ];
 
@@ -457,6 +494,15 @@ export async function hasEntryToday(): Promise<boolean> {
     .gte("created_at", start.toISOString());
   if (error) throw new Error(error.message);
   return (count ?? 0) > 0;
+}
+
+// Current journaling streak (consecutive days with an entry, ending today or
+// yesterday). Used by the reflection tab to link the habit together.
+export async function getJournalStreak(): Promise<number> {
+  const db = createServiceClient();
+  const { data, error } = await db.from("journal_entries").select("created_at");
+  if (error) throw new Error(error.message);
+  return computeStreak((data ?? []).map((r) => r.created_at));
 }
 
 export async function getLifeStats(): Promise<LifeStats> {

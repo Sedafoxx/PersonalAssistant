@@ -8,7 +8,7 @@ export type SortBy = "priority" | "created_at" | "due_date";
 
 // Columns to return — excludes `embedding` to keep payloads small.
 const ITEM_COLS =
-  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,created_at,updated_at";
+  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,planned_for,planned_time,day_order,required,goal_id,milestone_id,created_at,updated_at";
 
 // Drop embedding from rows returned by the match_items RPC (returns setof items).
 function stripEmbedding(row: Record<string, unknown>): Item {
@@ -28,6 +28,12 @@ export interface Item {
   due_date: string | null;
   notification_time: string | null;
   xp_awarded: number;
+  planned_for: string | null;
+  planned_time: string | null;
+  day_order: number | null;
+  required: boolean;
+  goal_id: string | null;
+  milestone_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -40,6 +46,12 @@ export interface CreateItemInput {
   tags?: string[];
   due_date?: string;
   notification_time?: string;
+  planned_for?: string;
+  planned_time?: string;
+  day_order?: number;
+  required?: boolean;
+  goal_id?: string;
+  milestone_id?: string | null;
 }
 
 export interface UpdateItemInput {
@@ -51,14 +63,26 @@ export interface UpdateItemInput {
   tags?: string[];
   due_date?: string;
   notification_time?: string;
+  planned_for?: string | null;
+  planned_time?: string | null;
+  day_order?: number | null;
+  required?: boolean;
+  goal_id?: string | null;
+  milestone_id?: string | null;
 }
 
-export async function getItems(opts: {
+export interface GetItemsOpts {
   type?: ItemType;
   status?: ItemStatus;
   sort_by?: SortBy;
   query?: string;
-} = {}): Promise<Item[]> {
+  // Only items planned for this exact local day (YYYY-MM-DD).
+  planned_for?: string;
+  // true → only planned items; false → only unplanned (planned_for is null).
+  has_plan?: boolean;
+}
+
+export async function getItems(opts: GetItemsOpts = {}): Promise<Item[]> {
   const db = createServiceClient();
 
   // Hybrid search: combine literal keyword (ilike) matches with semantic
@@ -70,6 +94,9 @@ export async function getItems(opts: {
     // Lexical: any query word as a substring of title or content.
     let lex = db.from("items").select(ITEM_COLS).neq("status", "archived");
     if (opts.type) lex = lex.eq("type", opts.type);
+    if (opts.planned_for) lex = lex.eq("planned_for", opts.planned_for);
+    if (opts.has_plan === false) lex = lex.is("planned_for", null);
+    if (opts.has_plan === true) lex = lex.not("planned_for", "is", null);
     // Drop short stopwords ("in", "to", "i") so they don't match everything
     // and bury the real hit under the row limit.
     const words = opts.query
@@ -114,6 +141,10 @@ export async function getItems(opts: {
   if (opts.type) q = q.eq("type", opts.type);
   if (opts.status) q = q.eq("status", opts.status);
   else q = q.neq("status", "archived");
+
+  if (opts.planned_for) q = q.eq("planned_for", opts.planned_for);
+  if (opts.has_plan === false) q = q.is("planned_for", null);
+  else if (opts.has_plan === true) q = q.not("planned_for", "is", null);
 
   const sortCol = opts.sort_by ?? "created_at";
   q = q.order(sortCol, { ascending: sortCol === "priority" });
@@ -190,7 +221,23 @@ export async function updateItem(
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error(`No item found with id "${id}"`);
-  return { ...(data as Item), xpGained };
+
+  // Roll-up choke point: every status change (sidebar, Today window, coach
+  // tools) flows through this one function, so hooking the milestone sync
+  // here means no caller can forget it. A roll-up failure must never fail the
+  // item update, so it is swallowed. Imported lazily to avoid a module-scope
+  // import cycle (milestones.ts must not import db.ts).
+  const row = data as Item;
+  if (row.milestone_id && input.status !== undefined) {
+    try {
+      const { syncMilestoneFromTasks } = await import("./milestones");
+      await syncMilestoneFromTasks(row.milestone_id);
+    } catch {
+      // best-effort: the milestone stays as-is; the task change still applies.
+    }
+  }
+
+  return { ...row, xpGained };
 }
 
 export async function deleteItem(id: string): Promise<void> {

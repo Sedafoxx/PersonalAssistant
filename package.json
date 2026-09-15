@@ -14,7 +14,8 @@
     "ask:features": "node --env-file=.env.local --import tsx scripts/feature-test.ts",
     "agent": "node --env-file=.env.local scripts/coding-agent-server.mjs",
     "agent:test": "node --env-file=.env.local --import tsx scripts/agent-test.ts",
-    "ask:deploy": "npm run ask:prepare && ask deploy"
+    "ask:deploy": "npm run ask:prepare && ask deploy",
+    "coach:test": "node --env-file=.env.local --import tsx scripts/coach-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

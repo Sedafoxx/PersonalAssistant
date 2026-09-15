@@ -12,6 +12,21 @@ out/
 # vercel
 .vercel
 
+# personal finance workspace — never push to GitHub
+# The whole directory is excluded, not just the raw data files: it holds the
+# statements, balances, the review tooling and the context/plan notes, and the
+# cost of leaking any of it is far higher than the cost of not versioning a
+# helper script. Narrow this to `finances/tools/` later if you want the tooling
+# tracked.
+finances/
+*.ofx
+transactions_*.csv
+finance-plan.md
+
+# agent working docs: design specs and reviews, which quote personal context
+# (finances, goals, relationships). Not part of the app, so they stay local.
+plans/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
@@ -25,9 +40,14 @@ graphify-out/
 # coding-agent scratch test dir
 .agent-test/
 
+# ZooCode harness per-project memory (local only)
+.zoo/
+
 # temp test/log files
 ask-deploy-out.txt
 smoke-out.txt
 live-test-out.txt
 live-search-out.txt
 .env.vercel.pulled
+
+.vercel

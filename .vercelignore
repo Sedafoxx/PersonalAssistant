@@ -1,0 +1,7 @@
+# Personal finance data — never upload to Vercel builds
+finances/private/
+finances/data/
+*.ofx
+transactions_*.csv
+finance-plan.md
+plans/

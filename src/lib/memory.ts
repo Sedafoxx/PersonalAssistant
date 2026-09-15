@@ -1,0 +1,428 @@
+import OpenAI from "openai";
+import { createServiceClient } from "./supabase";
+
+// --- living memory ----------------------------------------------------------
+//
+// A maintained store of facts the coach keeps CURRENT instead of accumulating.
+// A fact is a (topic, key) pair with one live value; writing the same key again
+// supersedes the old value rather than adding a contradicting row. Nothing in
+// this module ever issues a delete — superseded values stay for history.
+
+const TOPIC_COLS = "id,slug,title,summary,summary_updated_at,updated_at";
+const FACT_COLS =
+  "id,topic_id,key,value,status,pinned,source,superseded_by,created_at,updated_at";
+
+export type FactStatus = "active" | "superseded" | "pending_removal";
+
+export interface MemoryTopic {
+  id: string;
+  slug: string;
+  title: string;
+  summary: string | null;
+  summary_updated_at: string | null;
+  updated_at: string;
+}
+
+export interface MemoryFact {
+  id: string;
+  topic_id: string;
+  key: string;
+  value: string;
+  status: FactStatus;
+  pinned: boolean;
+  source: string | null;
+  superseded_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// --- pure helpers -----------------------------------------------------------
+
+// Topic title → slug: German diacritics are transliterated first (ä→ae, ö→oe,
+// ü→ue, ß→ss), then lowercased, trimmed, runs of any other non-alphanumeric
+// collapsed to a single "-", and leading/trailing dashes dropped.
+//
+// Transliterating rather than stripping matters twice over here: this user
+// writes German topic titles, so stripping mangles every one of them
+// ("Küche" → "k-che", "Vorräte" → "vorr-te"), and it also risks a collision,
+// since "Küche" and a literal "K-che" would otherwise slugify identically and
+// silently merge two different topics. Pure + exported so it can be checked
+// without a database.
+export function slugifyTopic(title: string): string {
+  return title
+    .replace(/Ä/g, "Ae")
+    .replace(/Ö/g, "Oe")
+    .replace(/Ü/g, "Ue")
+    .replace(/ä/g, "ae")
+    .replace(/ö/g, "oe")
+    .replace(/ü/g, "ue")
+    .replace(/ß/g, "ss")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+// --- LLM (mirrors coach.ts / journal.ts: DeepSeek-safe, single user message) --
+
+let _client: OpenAI | null = null;
+function llm(): OpenAI {
+  if (!_client) {
+    _client = new OpenAI({
+      apiKey: process.env.LLM_API_KEY ?? process.env.OPENAI_API_KEY,
+      baseURL: process.env.LLM_BASE_URL || undefined,
+    });
+  }
+  return _client;
+}
+const MODEL = process.env.LLM_MODEL ?? "gpt-4o";
+
+// --- topics -----------------------------------------------------------------
+
+// All topics, most recently active first.
+export async function getTopics(): Promise<MemoryTopic[]> {
+  try {
+    const db = createServiceClient();
+    const { data, error } = await db
+      .from("memory_topics")
+      .select(TOPIC_COLS)
+      .order("updated_at", { ascending: false });
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MemoryTopic[];
+  } catch {
+    return [];
+  }
+}
+
+// Resolve a topic by slug, creating it when missing. Safe against a concurrent
+// create: a duplicate-slug insert error falls back to a re-read.
+export async function getOrCreateTopic(title: string): Promise<MemoryTopic> {
+  const clean = title.trim();
+  const slug = slugifyTopic(clean) || "general";
+  const db = createServiceClient();
+
+  const { data: existing, error: readErr } = await db
+    .from("memory_topics")
+    .select(TOPIC_COLS)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (readErr) throw new Error(readErr.message);
+  if (existing) return existing as MemoryTopic;
+
+  const { data: created, error: insertErr } = await db
+    .from("memory_topics")
+    .insert({ slug, title: clean || slug })
+    .select(TOPIC_COLS)
+    .maybeSingle();
+  if (!insertErr && created) return created as MemoryTopic;
+
+  // Concurrency: another writer created the same slug between our read and
+  // insert. Re-read and return theirs rather than throwing.
+  const { data: again, error: reErr } = await db
+    .from("memory_topics")
+    .select(TOPIC_COLS)
+    .eq("slug", slug)
+    .maybeSingle();
+  if (reErr) throw new Error(reErr.message);
+  if (again) return again as MemoryTopic;
+  throw new Error(insertErr?.message ?? `Could not create topic "${clean}"`);
+}
+
+// --- facts ------------------------------------------------------------------
+
+// Active facts, pinned first then most recently updated. Optionally one topic.
+export async function getActiveFacts(topicId?: string): Promise<MemoryFact[]> {
+  try {
+    const db = createServiceClient();
+    let q = db
+      .from("memory_facts")
+      .select(FACT_COLS)
+      .eq("status", "active");
+    if (topicId) q = q.eq("topic_id", topicId);
+    q = q
+      .order("pinned", { ascending: false })
+      .order("updated_at", { ascending: false });
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MemoryFact[];
+  } catch {
+    return [];
+  }
+}
+
+// Active AND superseded facts for one topic, so the UI can show what changed.
+export async function getFactsIncludingHistory(
+  topicId: string
+): Promise<MemoryFact[]> {
+  try {
+    const db = createServiceClient();
+    const { data, error } = await db
+      .from("memory_facts")
+      .select(FACT_COLS)
+      .eq("topic_id", topicId)
+      .in("status", ["active", "superseded"])
+      .order("pinned", { ascending: false })
+      .order("updated_at", { ascending: false });
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MemoryFact[];
+  } catch {
+    return [];
+  }
+}
+
+export interface UpsertFactInput {
+  topic: string;
+  key: string;
+  value: string;
+  source?: string;
+  pinned?: boolean;
+}
+
+export interface UpsertFactResult {
+  fact: MemoryFact | null;
+  supersededId: string | null;
+  changed: boolean;
+}
+
+// The one write path, and the heart of this module: update instead of
+// accumulate. Returns the live fact, the id it superseded (if any), and whether
+// anything the user cares about actually changed.
+export async function upsertFact(
+  input: UpsertFactInput
+): Promise<UpsertFactResult> {
+  const key = input.key.trim().slice(0, 200);
+  const value = input.value.trim().slice(0, 2000);
+  if (!key || !value) return { fact: null, supersededId: null, changed: false };
+
+  const topic = await getOrCreateTopic(input.topic);
+  const db = createServiceClient();
+  const now = new Date().toISOString();
+
+  // Read the live fact for this key. key_norm is the generated lower(btrim())
+  // column, so matching on it is case-insensitive.
+  const { data: live, error: liveErr } = await db
+    .from("memory_facts")
+    .select(FACT_COLS)
+    .eq("topic_id", topic.id)
+    .eq("status", "active")
+    .eq("key_norm", key.toLowerCase())
+    .maybeSingle();
+  if (liveErr) throw new Error(liveErr.message);
+
+  // 6. A pinned live fact is never overwritten.
+  if (live && live.pinned) {
+    return { fact: live as MemoryFact, supersededId: null, changed: false };
+  }
+
+  // 4. Same value → touch updated_at only; a repeat mention must not churn
+  // history.
+  if (live && (live.value as string).trim() === value) {
+    const { data: touched, error } = await db
+      .from("memory_facts")
+      .update({ updated_at: now })
+      .eq("id", live.id)
+      .select(FACT_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return { fact: (touched as MemoryFact) ?? (live as MemoryFact), supersededId: null, changed: false };
+  }
+
+  let supersededId: string | null = null;
+
+  if (live) {
+    // 5. Supersede FIRST — this frees the partial unique slot for the new row.
+    const { error: supErr } = await db
+      .from("memory_facts")
+      .update({ status: "superseded", updated_at: now })
+      .eq("id", live.id);
+    if (supErr) throw new Error(supErr.message);
+    supersededId = live.id as string;
+  }
+
+  // 3 & 5. Insert the new active row.
+  const { data: created, error: insErr } = await db
+    .from("memory_facts")
+    .insert({
+      topic_id: topic.id,
+      key,
+      value,
+      status: "active",
+      pinned: input.pinned ?? false,
+      source: input.source ?? null,
+    })
+    .select(FACT_COLS)
+    .maybeSingle();
+  if (insErr) throw new Error(insErr.message);
+  const fact = created as MemoryFact;
+
+  // 5. Link the old row to its replacement (best-effort — the value is already
+  // safely superseded and linked by status even if this fails).
+  if (supersededId && fact?.id) {
+    try {
+      const { error } = await db
+        .from("memory_facts")
+        .update({ superseded_by: fact.id, updated_at: now })
+        .eq("id", supersededId);
+      if (error) throw new Error(error.message);
+    } catch {
+      // non-fatal: the supersede already happened
+    }
+  }
+
+  return { fact, supersededId, changed: true };
+}
+
+// --- human-override path ----------------------------------------------------
+
+export async function setFactValueByHand(
+  id: string,
+  value: string
+): Promise<MemoryFact | null> {
+  const clean = value.trim().slice(0, 2000);
+  if (!clean) return null;
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("memory_facts")
+    .update({ value: clean, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select(FACT_COLS)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return (data as MemoryFact) ?? null;
+}
+
+export async function setFactStatus(
+  id: string,
+  status: FactStatus
+): Promise<MemoryFact | null> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("memory_facts")
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select(FACT_COLS)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return (data as MemoryFact) ?? null;
+}
+
+export async function setFactPinned(
+  id: string,
+  pinned: boolean
+): Promise<MemoryFact | null> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("memory_facts")
+    .update({ pinned, updated_at: new Date().toISOString() })
+    .eq("id", id)
+    .select(FACT_COLS)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  return (data as MemoryFact) ?? null;
+}
+
+// Facts flagged for removal, awaiting a human decision (never deleted here).
+export async function getPendingRemovals(): Promise<MemoryFact[]> {
+  try {
+    const db = createServiceClient();
+    const { data, error } = await db
+      .from("memory_facts")
+      .select(FACT_COLS)
+      .eq("status", "pending_removal")
+      .order("updated_at", { ascending: false });
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MemoryFact[];
+  } catch {
+    return [];
+  }
+}
+
+// --- curation ---------------------------------------------------------------
+
+const CURATE_SYSTEM = `You maintain a single "topic" note about a person's life from their CURRENT facts. Write ONE short, current, human-readable paragraph in present tense that a coach could read at a glance.
+
+Rules:
+- Use ONLY the facts given. Never invent or infer anything not stated.
+- Present tense, third person ("They ..." / "Their ..."). 1-3 sentences.
+- No bullet lists, no headings, no markdown, no preamble ("Here is ..."). Plain prose only.
+- If the facts contradict, trust the most recently updated one.
+
+Return ONLY JSON: {"summary": "..."}`;
+
+// Best-effort LLM rewrite of a topic summary from its ACTIVE facts only.
+// Returns null on any failure and leaves the previous summary in place — a
+// failed rewrite must never blank a good summary.
+export async function curateTopic(topicId: string): Promise<string | null> {
+  try {
+    const facts = await getActiveFacts(topicId);
+    if (!facts.length) return null;
+
+    const factLines = facts
+      .map((f) => `- ${f.key}: ${f.value} (updated ${f.updated_at})`)
+      .join("\n");
+
+    const res = await llm().chat.completions.create({
+      model: MODEL,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: CURATE_SYSTEM },
+        { role: "user", content: `Facts:\n${factLines}\n\nWrite the summary (JSON).` },
+      ],
+    });
+    const raw = (res.choices[0].message.content ?? "").trim();
+    const summary = (JSON.parse(raw) as { summary?: string }).summary?.trim();
+    if (!summary) return null;
+
+    const db = createServiceClient();
+    const now = new Date().toISOString();
+    const { error } = await db
+      .from("memory_topics")
+      .update({ summary, summary_updated_at: now, updated_at: now })
+      .eq("id", topicId);
+    if (error) throw new Error(error.message);
+    return summary;
+  } catch {
+    return null;
+  }
+}
+
+// --- prompt context ---------------------------------------------------------
+
+// Compact markdown for the coach prompt, in the same "##"-section style as
+// buildCoachContext. One line per topic with its summary, then its facts as
+// "- key: value" (pinned marked). Returns "" when there is nothing to say.
+export async function formatForContext(opts?: {
+  maxTopics?: number;
+  maxFactsPerTopic?: number;
+}): Promise<string> {
+  const maxTopics = opts?.maxTopics ?? 8;
+  const maxFactsPerTopic = opts?.maxFactsPerTopic ?? 12;
+  try {
+    const topics = await getTopics();
+    if (!topics.length) return "";
+    const facts = await getActiveFacts();
+    if (!facts.length) return "";
+
+    const byTopic = new Map<string, MemoryFact[]>();
+    for (const f of facts) {
+      const list = byTopic.get(f.topic_id) ?? [];
+      list.push(f);
+      byTopic.set(f.topic_id, list);
+    }
+
+    const blocks: string[] = [];
+    for (const t of topics.slice(0, maxTopics)) {
+      const list = (byTopic.get(t.id) ?? []).slice(0, maxFactsPerTopic);
+      if (!list.length) continue;
+      const header = t.summary ? `### ${t.title} — ${t.summary}` : `### ${t.title}`;
+      const lines = list.map(
+        (f) => `- ${f.key}: ${f.value}${f.pinned ? " [pinned]" : ""}`
+      );
+      blocks.push([header, ...lines].join("\n"));
+    }
+    if (!blocks.length) return "";
+    return `## Living memory (maintained facts)\n\n${blocks.join("\n\n")}`;
+  } catch {
+    return "";
+  }
+}

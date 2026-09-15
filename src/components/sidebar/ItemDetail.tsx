@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { type Item } from "@/lib/db";
 import { linkify } from "@/lib/linkify";
+import { countdownLabel } from "@/lib/dates";
 
 const TYPE_COLORS: Record<string, string> = {
   todo: "bg-blue-500/20 text-blue-300",
@@ -89,7 +90,16 @@ export function ItemDetail({
           )}
 
           <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-600">
-            {item.due_date && <span>Due {new Date(item.due_date).toLocaleString()}</span>}
+            {item.due_date && (
+              <span>
+                {countdownLabel(item.due_date)}
+                {countdownLabel(item.due_date) ? " · " : "Due "}
+                {new Date(`${item.due_date}T00:00:00`).toLocaleDateString(
+                  undefined,
+                  { weekday: "short", day: "numeric", month: "short" }
+                )}
+              </span>
+            )}
             <span>Created {new Date(item.created_at).toLocaleDateString()}</span>
           </div>
         </div>

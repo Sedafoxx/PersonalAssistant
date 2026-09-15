@@ -21,7 +21,7 @@
     "apis": {
       "custom": {
         "endpoint": {
-          "uri": "https://personal-assistant-6t0xy73f7-sedafoxxs-projects.vercel.app/api/alexa",
+          "uri": "https://personal-assistant-two-pi.vercel.app/api/alexa",
           "sslCertificateType": "Wildcard"
         }
       }

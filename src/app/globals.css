@@ -17,6 +17,13 @@ body {
   box-sizing: border-box;
 }
 
+/* Native momentum scrolling + no bounce propagation on mobile scroll areas. */
+.overflow-y-auto,
+.overflow-y-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
 }

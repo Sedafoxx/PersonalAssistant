@@ -4,11 +4,15 @@ import { getItems, createItem, type ItemType, type ItemStatus, type SortBy } fro
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   try {
+    const hasPlanParam = searchParams.get("has_plan");
     const items = await getItems({
       type: searchParams.get("type") as ItemType | undefined ?? undefined,
       status: searchParams.get("status") as ItemStatus | undefined ?? undefined,
       sort_by: searchParams.get("sort_by") as SortBy | undefined ?? undefined,
       query: searchParams.get("q") ?? undefined,
+      planned_for: searchParams.get("planned_for") ?? undefined,
+      has_plan:
+        hasPlanParam === null ? undefined : hasPlanParam === "true" || hasPlanParam === "1",
     });
     return NextResponse.json(items);
   } catch (err) {

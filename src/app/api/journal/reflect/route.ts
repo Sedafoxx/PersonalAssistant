@@ -8,30 +8,53 @@ import {
 } from "@/lib/journal";
 import { getGoals } from "@/lib/goals";
 
-// Guided reflection: the AI asks ONE warm, casual follow-up question at a time,
-// grounded in the user's latest entry, their life categories, long-term
-// memories, and goals. POST { entry_id?, history: [{role, content}] }.
+// Format a YYYY-MM-DD day string as a friendly label like "Monday, 6 September".
+function friendlyDay(day: string): string {
+  const [y, m, d] = day.split("-").map(Number);
+  if (!y || !m || !d) return "";
+  const dt = new Date(Date.UTC(y, m - 1, d, 12));
+  return dt.toLocaleDateString("en", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+// Convert a UTC timestamp to the local date string for the given offset
+// (minutes, as returned by Date#getTimezoneOffset — negative ahead of UTC).
+function localDay(iso: string, offsetMin: number): string {
+  const ms = new Date(iso).getTime() - offsetMin * 60000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+// Guided reflection, now session-aware:
+//   - Empty history  = a NEW daily session. The AI opens the reflection for the
+//     user's local day, grounded only on today's entries + background memory —
+//     it does NOT re-process the previous session or latest old entry.
+//   - Non-empty history = continuing the current session's thread.
+// POST { history, day?, tz_offset? } — day/tz_offset are the client's local
+// date + timezone offset so "today" is correct in the user's timezone.
 export async function POST(req: NextRequest) {
   try {
-    const { entry_id, history } = (await req.json()) as {
-      entry_id?: string;
+    const { history, day, tz_offset } = (await req.json()) as {
       history?: { role: string; content: string }[];
+      day?: string; // client's local YYYY-MM-DD
+      tz_offset?: number; // Date#getTimezoneOffset() minutes
     };
 
+    const isNewSession = !Array.isArray(history) || history.length === 0;
+    const offsetMin = typeof tz_offset === "number" ? tz_offset : 0;
+    const localToday = typeof day === "string" ? day : localDay(new Date().toISOString(), offsetMin);
+
     const recent = await getJournalEntries(100);
-    const entry = entry_id
-      ? recent.find((e) => e.id === entry_id) ?? recent[0]
-      : recent[0];
-    // No entries yet: still greet the user with an opening question so the
-    // app can always ask, even on a fresh journal.
-    if (!entry) {
-      return NextResponse.json({
-        reply:
-          "Welcome back! I'd love to hear what's on your mind today — what's been taking up most of your headspace lately?",
-        memory: null,
-        categories: [],
-      });
-    }
+
+    // Only entries logged today feed the opener — older ones stay out so the
+    // session starts fresh instead of talking about the past.
+    const todayEntries = recent
+      .filter((e) => localDay(e.created_at, offsetMin) === localToday)
+      .map((e) => e.summary ?? e.raw_text)
+      .slice(0, 5);
 
     const [categories, memories, goals] = await Promise.all([
       getCategories(),
@@ -39,18 +62,29 @@ export async function POST(req: NextRequest) {
       getGoals("active"),
     ]);
 
-    const result = await reflect(entry.raw_text, {
+    // For a continuing session, keep grounding on the latest entry; fresh
+    // sessions intentionally pass no old entry so they don't rehash the past.
+    const entryText = isNewSession ? "" : (recent[0]?.raw_text ?? "");
+
+    const result = await reflect(entryText, {
       categories: categories.map((c) => c.name),
       memories: memories.map((m) => m.text),
       goals: goals.map((g) => g.title),
-      history: Array.isArray(history)
-        ? history
+      history: isNewSession
+        ? []
+        : history
             .slice(-10)
             .map((h) => ({
-              role: h.role === "assistant" ? ("assistant" as const) : ("user" as const),
+              role:
+                h.role === "assistant"
+                  ? ("assistant" as const)
+                  : ("user" as const),
               content: String(h.content ?? ""),
-            }))
-        : [],
+            })),
+      // New-session context: the current day + what's been logged today.
+      ...(isNewSession
+        ? { todayLabel: friendlyDay(localToday) || "today", todayEntries }
+        : {}),
     });
 
     if (result.memory) {
@@ -65,6 +99,7 @@ export async function POST(req: NextRequest) {
       reply: result.reply,
       memory: result.memory,
       categories: categories.map((c) => c.name),
+      session: isNewSession ? "new" : "continue",
     });
   } catch (err) {
     console.error("journal reflect error", err);

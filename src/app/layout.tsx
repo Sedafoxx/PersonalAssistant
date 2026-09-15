@@ -18,7 +18,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="h-screen overflow-hidden">{children}</body>
+      {/* h-dvh (dynamic viewport height) instead of h-screen so mobile browsers
+          with a visible/retracting URL bar get the real visible height. */}
+      <body className="h-dvh overflow-hidden">{children}</body>
     </html>
   );
 }

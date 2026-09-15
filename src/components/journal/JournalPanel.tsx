@@ -8,6 +8,15 @@ import type { Goal } from "@/lib/goals";
 
 type ReflMsg = { role: "user" | "assistant"; content: string };
 
+// The user's local calendar date (YYYY-MM-DD) + UTC offset minutes, so the
+// server knows which "today" to open a fresh daily reflection for.
+function localDay(): string {
+  const d = new Date();
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+}
+const tzOffset = typeof window === "undefined" ? 0 : new Date().getTimezoneOffset();
+
 export function JournalPanel() {
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [stats, setStats] = useState<LifeStatsView | null>(null);
@@ -106,7 +115,7 @@ export function JournalPanel() {
         const rres = await fetch("/api/journal/reflect", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ history }),
+          body: JSON.stringify({ history, day: localDay(), tz_offset: tzOffset }),
         });
         const rdata = await rres.json();
         if (rdata.reply) {
@@ -141,10 +150,12 @@ export function JournalPanel() {
     setReflecting(true);
     setReflectMsgs([]);
     try {
+      // A fresh session: empty history. The server opens today's daily
+      // reflection instead of re-processing a previous one.
       const res = await fetch("/api/journal/reflect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ history: [] }),
+        body: JSON.stringify({ history: [], day: localDay(), tz_offset: tzOffset }),
       });
       const data = await res.json();
       if (data.reply) setReflectMsgs([{ role: "assistant", content: data.reply }]);
@@ -158,6 +169,15 @@ export function JournalPanel() {
 
   return (
     <div className="flex flex-col h-full relative">
+      {/* Toast */}
+      {toast && (
+        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-3 py-1.5 rounded-full bg-emerald-600 text-white text-xs shadow-lg">
+          {toast}
+        </div>
+      )}
+
+      {/* Scrollable content — the whole panel scrolls so it works on phones */}
+      <div className="flex-1 overflow-y-auto overscroll-contain">
       {stats && <StatsBar stats={stats} />}
 
       {/* Life areas */}
@@ -234,15 +254,8 @@ export function JournalPanel() {
         </div>
       )}
 
-      {/* Toast */}
-      {toast && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 px-3 py-1.5 rounded-full bg-emerald-600 text-white text-xs shadow-lg">
-          {toast}
-        </div>
-      )}
-
       {/* Entry list */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div className="px-4 py-4 space-y-3">
         {entries.length === 0 && (
           <p className="text-sm text-gray-600 text-center mt-8">
             No entries yet. Answer the AI below — speak or type.
@@ -306,7 +319,7 @@ export function JournalPanel() {
             </button>
           )}
         </div>
-        <div className="max-h-44 overflow-y-auto space-y-2 pr-1">
+        <div className="space-y-2 pr-1">
           {reflectMsgs.map((m, i) => (
             <div
               key={i}
@@ -326,8 +339,10 @@ export function JournalPanel() {
         </div>
       </div>
 
-      {/* Composer — the single input */}
-      <div className="px-4 pb-4 pt-2">
+      </div>
+
+      {/* Composer — the single input, pinned at the bottom */}
+      <div className="px-4 pt-2 border-t border-white/5 bg-[#0f0f0f] pb-[max(1rem,env(safe-area-inset-bottom))]">
         <div className="flex gap-2 items-end bg-[#1a1a1a] border border-white/10 rounded-2xl px-4 py-3 focus-within:border-indigo-500/50 transition-colors">
           <textarea
             ref={taRef}

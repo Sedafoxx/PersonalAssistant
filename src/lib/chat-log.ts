@@ -55,3 +55,21 @@ export async function getConversation(
   if (error) throw new Error(error.message);
   return ((data ?? []) as ChatMessageRow[]).reverse();
 }
+
+// Full visible thread for ONE conversation (client_id), oldest first — this is
+// what the UI uses to restore history on mount / mode change. A wider window
+// than getConversation (which stays at 40 for the model context).
+export async function getThread(
+  clientId: string,
+  limit = 200
+): Promise<ChatMessageRow[]> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("chat_messages")
+    .select("role,content,created_at")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as ChatMessageRow[]).reverse();
+}

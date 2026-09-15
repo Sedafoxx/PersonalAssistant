@@ -78,6 +78,14 @@ export async function deleteGoal(id: string): Promise<void> {
 }
 
 // Bump progress by `by` (default 1), auto-complete when target reached.
+//
+// Milestone-backed goals are DERIVED: their progress/target come from the
+// goal_milestones table (see syncGoalProgress in milestones.ts), so a journal
+// mention must NOT also bump them. goals.ts and milestones.ts would form an
+// import cycle if imported both ways at module scope (milestones.ts imports
+// from goals.ts), so the shared check is pulled in lazily inside the function
+// body via a dynamic import — it also keeps this path from loading the
+// milestones module at all when the goal turns out to be milestone-backed.
 export async function incrementGoalProgress(
   id: string,
   by = 1
@@ -91,9 +99,30 @@ export async function incrementGoalProgress(
   if (e1) throw new Error(e1.message);
   if (!cur) throw new Error(`No goal found with id "${id}"`);
 
+  // Function-scope import avoids a module-level cycle with milestones.ts.
+  const { goalHasMilestones } = await import("./milestones");
+  if (await goalHasMilestones(id)) {
+    // Derived goal → the journal-driven bump is a no-op; return unchanged.
+    return (await getGoalById(id)) as Goal;
+  }
+
   const progress = (cur.progress ?? 0) + by;
   const status: GoalStatus =
     cur.target != null && progress >= cur.target ? "done" : (cur.status as GoalStatus);
 
   return updateGoal(id, { progress, status });
+}
+
+// Read one goal by id (used to return the unchanged row for milestone-backed
+// goals without a second status computation).
+async function getGoalById(id: string): Promise<Goal> {
+  const db = createServiceClient();
+  const { data, error } = await db
+    .from("goals")
+    .select(GOAL_COLS)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) throw new Error(`No goal found with id "${id}"`);
+  return data as Goal;
 }

@@ -22,7 +22,10 @@ export type SuggestionCategory =
   | "content";
 
 const SUGGESTION_COLS =
-  "id,title,category,rationale,evidence,status,created_at,updated_at";
+  "id,title,category,rationale,evidence,acceptance,effort,priority,area,status,created_at,updated_at";
+
+export type SuggestionEffort = "small" | "medium" | "large";
+export type SuggestionPriority = "low" | "medium" | "high";
 
 export interface Suggestion {
   id: string;
@@ -30,6 +33,10 @@ export interface Suggestion {
   category: SuggestionCategory;
   rationale: string | null;
   evidence: string | null;
+  acceptance: string | null; // how we'll know it's done
+  effort: string | null; // small | medium | large
+  priority: string | null; // low | medium | high
+  area: string | null; // chat | journal | coach | items | calendar | notifications | other
   status: SuggestionStatus;
   created_at: string;
   updated_at: string;
@@ -136,19 +143,24 @@ async function buildUsageDigest(): Promise<string> {
 
 // --- generation ------------------------------------------------------------
 
-const SYSTEM = `You are a product analyst improving a single-user personal-assistant web app (chat to capture todos/notes/ideas, a journal with mood/XP gamification, goals, push reminders, voice input).
+const SYSTEM = `You are a product analyst + tech lead improving a single-user personal-assistant web app (chat to capture todos/notes/ideas, a journal with mood/XP gamification, goals, a proactive life coach, a day planner, push reminders, voice input, Google Calendar).
 
-Given the user's real usage data, propose concrete, specific suggestions to improve THIS user's experience or add features they would clearly benefit from. Ground every suggestion in an observed pattern from the data — not generic product advice.
+Given the user's real usage data, write CLEAR, ACTIONABLE CHANGE REQUESTS a coding agent can implement directly. Ground every request in an observed pattern — not generic product advice. Each request must be specific enough to implement without further clarification.
 
-Return ONLY JSON: {"suggestions":[{"title","category","rationale","evidence"}]}
+Return ONLY JSON: {"suggestions":[{"title","category","rationale","evidence","acceptance","effort","priority","area"}]}
 - "title": short imperative headline (e.g. "Auto-create todos from journal mentions").
 - "category": one of feature | ux | workflow | automation | content.
 - "rationale": one or two sentences on why it helps this user.
 - "evidence": the specific data pattern that prompted it (quote/paraphrase the signal).
+- "acceptance": 1-3 bullet-style criteria ("- ...; - ...") describing exactly how we'll know it's done.
+- "effort": small | medium | large.
+- "priority": low | medium | high.
+- "area": chat | journal | coach | items | calendar | notifications | other.
 
 Rules:
-- Propose 3-6 suggestions. Quality over quantity. If data is thin, propose fewer.
+- Propose 3-6 requests. Quality over quantity. If data is thin, propose fewer.
 - Be concrete and buildable, not vague ("improve UX" is bad; "show a mood-trend sparkline above the journal" is good).
+- Each request must be self-contained: a developer could implement it from the title + rationale + acceptance alone.
 - Do NOT repeat or lightly reword any suggestion in the "Already suggested" list.`;
 
 interface RawSuggestion {
@@ -156,6 +168,10 @@ interface RawSuggestion {
   category?: string;
   rationale?: string;
   evidence?: string;
+  acceptance?: string;
+  effort?: string;
+  priority?: string;
+  area?: string;
 }
 
 const CATEGORIES: SuggestionCategory[] = [
@@ -198,6 +214,9 @@ export async function generateSuggestions(): Promise<Suggestion[]> {
     return [];
   }
 
+  const EFFORTS = ["small", "medium", "large"];
+  const PRIORITIES = ["low", "medium", "high"];
+  const AREAS = ["chat", "journal", "coach", "items", "calendar", "notifications", "other"];
   const rows = (parsed.suggestions ?? [])
     .map((s) => ({
       title: (s.title ?? "").trim(),
@@ -206,6 +225,10 @@ export async function generateSuggestions(): Promise<Suggestion[]> {
         : "feature") as SuggestionCategory,
       rationale: (s.rationale ?? "").trim() || null,
       evidence: (s.evidence ?? "").trim() || null,
+      acceptance: (s.acceptance ?? "").trim() || null,
+      effort: EFFORTS.includes(String(s.effort)) ? String(s.effort) : null,
+      priority: PRIORITIES.includes(String(s.priority)) ? String(s.priority) : null,
+      area: AREAS.includes(String(s.area)) ? String(s.area) : null,
     }))
     .filter(
       (s) => s.title.length > 0 && !existingTitles.has(s.title.toLowerCase())
