@@ -31,7 +31,8 @@ import {
   toggleMilestone,
   type Milestone,
 } from "./milestones";
-import { getReflection, upsertReflection } from "./reflection";
+import { getReflection, upsertReflection, DEFAULT_CHECKLIST } from "./reflection";
+import { saveCheckin } from "./coach";
 import {
   getList,
   addToList,
@@ -662,15 +663,26 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "save_reflection",
       description:
-        "Save the user's evening reflection for today, so it appears in their Reflection tab. Only pass the fields the user actually gave; empty values never overwrite existing ones.",
+        "Save the user's evening reflection for today. Call this once a reflection conversation has covered what they wanted to say: it marks today's reflection COMPLETE, which advances their streak, and records the mood numerically so their mood history and stats stay accurate. Infer the mood from how they described the day rather than asking them to score it. Only pass what was actually said; empty values never overwrite what is already saved.",
       parameters: {
         type: "object",
         properties: {
-          went_well: { type: "string", description: "What went well today." },
-          could_improve: { type: "string", description: "What could improve." },
+          went_well: { type: "string", description: "What went well today, in their words." },
+          could_improve: { type: "string", description: "What could improve, in their words." },
           mood: {
-            type: "string",
-            description: "Optional short mood note that is folded into the reflection.",
+            type: "number",
+            description:
+              "Mood 1-5 inferred from how they described the day (1 = rough, 5 = great). Omit if it is genuinely unclear.",
+          },
+          energy: {
+            type: "number",
+            description: "Energy 1-5, only if it came up.",
+          },
+          habits: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              'Habits they said they did today, e.g. ["move", "water"]. Matched case-insensitively against their checklist: journal, plan, screens, move, water, gratitude.',
           },
         },
       },
@@ -1175,31 +1187,73 @@ export async function executeTool(
       const day = localDay();
       const wentWell = (input.went_well as string | undefined)?.trim();
       const couldImprove = (input.could_improve as string | undefined)?.trim();
-      const mood = (input.mood as string | undefined)?.trim();
+      const habits = Array.isArray(input.habits)
+        ? input.habits
+            .map((h) => String(h).trim().toLowerCase())
+            .filter((h) => h.length > 0)
+        : [];
+
+      // Clamp rather than trust: a 0 or a 7 would corrupt the mood sparkline and
+      // the stats tab.
+      const rating = (value: unknown): number | undefined => {
+        const n = Math.round(Number(value));
+        return Number.isFinite(n) && n >= 1 && n <= 5 ? n : undefined;
+      };
+      const mood = rating(input.mood);
+      const energy = rating(input.energy);
 
       // Read the current record first so an empty field never clobbers a value
-      // the user already saved.
+      // that is already saved.
       const existing = await getReflection(day);
 
-      // Merge mood into went_well when the user only offered a mood.
-      let nextWent: string | null = existing?.went_well ?? null;
-      if (wentWell) nextWent = wentWell;
-      if (mood) {
-        nextWent = nextWent ? nextWent + "\nMood: " + mood : "Mood: " + mood;
+      // Mood is recorded on the day's evening check-in, not only as prose: the
+      // mood sparkline, the stats tab and the coach's own context read it from
+      // there, so recording text alone would quietly end mood tracking now that
+      // the form is gone.
+      // Close the day's evening check-in as well. That used to be the "Log today"
+      // button; leaving it open would keep the evening action on the coach's
+      // "open past actions" list, so it would keep re-proposing what you have just
+      // finished reflecting on. Undefined ratings are simply not written.
+      try {
+        await saveCheckin({ kind: "evening", day, mood, energy, status: "done" });
+      } catch {
+        // non-fatal — the reflection below still saves
       }
 
-      const nextImprove: string | null = couldImprove
-        ? couldImprove
-        : (existing?.could_improve ?? null);
+      // Tick the checklist items the conversation actually covered, so the habits
+      // count in the Wins card keeps working without a form.
+      const base = existing?.checklist ?? DEFAULT_CHECKLIST;
+      const checklist = habits.length
+        ? base.map((item) =>
+            habits.some(
+              (h) => item.id.toLowerCase() === h || item.label.toLowerCase().includes(h)
+            )
+              ? { ...item, done: true }
+              : item
+          )
+        : base;
 
       const reflection = await upsertReflection({
         day,
-        went_well: nextWent,
-        could_improve: nextImprove,
+        checklist,
+        went_well: wentWell ?? existing?.went_well ?? null,
+        could_improve: couldImprove ?? existing?.could_improve ?? null,
+        // A lived-through conversation IS the reflection, so it counts as done.
+        // Without this the streak could never advance from a chat reflection.
+        completed: true,
       });
-      return reflection
-        ? "Saved your reflection for " + day + "."
-        : "Could not save the reflection - try again.";
+      if (!reflection) return "Could not save the reflection - try again.";
+
+      const bits = [
+        mood !== undefined ? `mood ${mood}/5` : "",
+        habits.length ? `${habits.length} habit${habits.length === 1 ? "" : "s"}` : "",
+      ].filter((b) => b.length > 0);
+      return (
+        "Reflection saved for " +
+        day +
+        (bits.length > 0 ? " (" + bits.join(", ") + ")" : "") +
+        ". Streak updated."
+      );
     }
 
     case "remember_fact": {

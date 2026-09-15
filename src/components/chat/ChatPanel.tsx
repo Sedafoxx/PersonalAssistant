@@ -32,21 +32,10 @@ const WELCOME: Message = {
 const TEXT_EXTS = /\.(txt|md|csv|json|ts|tsx|js|jsx|py|sql|html|css|log|ini|yml|yaml|xml)$/i;
 const MAX_ATTACH_CHARS = 50000;
 
-type ChatMode = "assistant" | "coach";
+// (The persona type is gone: one assistant, one conversation.)
 
-const WELCOME_COACH: Message = {
-  role: "assistant",
-  content:
-    "Hey — I'm your life coach 🎯. I can see your goals, mood, and reflections, and I'll suggest one small next step at a time. What's on your mind, or how's the day going?",
-};
-
-function welcomeFor(mode: ChatMode): Message {
-  return mode === "coach" ? WELCOME_COACH : WELCOME;
-}
-
-// Each mode owns its own rotatable thread id. Assistant history stays under the
-// plain per-browser id (pa:clientId); coach history stays under the legacy
-// "<id>:coach" namespace the database already uses.
+// There is one identity now, so there is one welcome: the assistant and the
+// coach are the same partner and the persona lives in the server prompt.
 function randomId(): string {
   return (
     window.crypto?.randomUUID?.() ??
@@ -69,30 +58,18 @@ function getBaseClientId(): string {
   }
 }
 
-// The two stored thread keys, per mode.
-const ASSISTANT_KEY = "pa:clientId";
-const COACH_KEY = "pa:coachClientId";
+// One thread, one key. The old coach thread (`<id>:coach`) is not abandoned:
+// the server reads BOTH ids and merges them, so nothing from either persona's
+// history is lost by collapsing them.
+const THREAD_KEY = "pa:clientId";
 
-// Resolve the thread id for a mode. The coach key is seeded once from the
-// legacy `${assistantId}:coach` value so an existing coach conversation is not
-// stranded by this change.
-function getThreadId(mode: ChatMode): string {
-  if (typeof window === "undefined") return "server";
-  try {
-    if (mode === "assistant") return getBaseClientId();
-    let id = localStorage.getItem(COACH_KEY);
-    if (!id) {
-      id = `${getBaseClientId()}:coach`;
-      localStorage.setItem(COACH_KEY, id);
-    }
-    return id;
-  } catch {
-    return "anon";
-  }
+// The single rotatable thread id for this browser.
+function getThreadId(): string {
+  return getBaseClientId();
 }
 
 export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
-  const [mode, setMode] = useState<ChatMode>("assistant");
+  // One identity: there is no mode to pick any more.
   const [messages, setMessages] = useState<Message[]>([WELCOME]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -113,11 +90,12 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
     setInput((prev) => (prev ? `${prev} ${t}` : t).trim())
   );
 
-  // Load the stored thread for a mode and render it, falling back to that
-  // mode's welcome bubble when the thread is empty. Always runs inside an
-  // effect (never during render) so the server and first client render match.
-  const loadThread = useCallback(async (next: ChatMode) => {
-    const id = getThreadId(next);
+  // Load the stored thread and render it, falling back to the welcome bubble when
+  // it is empty. Always runs inside an effect (never during render) so the server
+  // and first client render match. The server merges the legacy coach thread in,
+  // so this restores the whole history as one conversation.
+  const loadThread = useCallback(async () => {
+    const id = getThreadId();
     threadIdRef.current = id;
     try {
       const res = await fetch(`/api/chat?client_id=${encodeURIComponent(id)}`);
@@ -128,43 +106,39 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
       const restored: Message[] = rows
         .filter((r) => r.role === "user" || r.role === "assistant")
         .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
-      setMessages(restored.length > 0 ? restored : [welcomeFor(next)]);
+      setMessages(restored.length > 0 ? restored : [WELCOME]);
     } catch {
       // History is best-effort; show the welcome on failure.
-      setMessages([welcomeFor(next)]);
+      setMessages([WELCOME]);
     }
     setMultiSel({});
   }, []);
 
-  // Restore history on mount and whenever the active mode changes. Also honours
-  // the /?mode=coach deep link, preserving the previous default (assistant).
+  // Restore history on mount. `?mode=` deep links still work but no longer select
+  // anything: there is only one conversation.
+  //
+  // `?prompt=reflection` is how the Reflections view hands over now that it is
+  // read-only. It PRE-FILLS the message rather than sending it, deliberately:
+  // auto-sending would have to race the history restore, and sendText closes over
+  // the `messages` of this render — so it would wipe the conversation it had just
+  // loaded. Prefilling also lets you edit the opener before sending.
   useEffect(() => {
-    let initial: ChatMode = "assistant";
+    loadThread();
     try {
-      const q = new URLSearchParams(window.location.search).get("mode");
-      if (q === "coach") initial = "coach";
+      const q = new URLSearchParams(window.location.search).get("prompt");
+      if (q === "reflection") setInput("I want to do my evening reflection.");
     } catch {
-      // no query string available — keep the default mode
+      // no query string available
     }
-    if (initial !== "assistant") setMode(initial);
-    loadThread(initial);
   }, [loadThread]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Switch persona (assistant <-> coach). Each keeps its own conversation
-  // memory and its own thread id, so the two don't bleed into each other.
-  function switchMode(next: ChatMode) {
-    if (next === mode) return;
-    setMode(next);
-    loadThread(next);
-  }
-
-  // Manual reset of the ACTIVE mode only: mint a fresh thread id, store it, and
-  // clear the transcript back to that mode's welcome. The previous rows stay in
-  // the database — a reset stops the thread, it does not delete history.
+  // Manual reset: mint a fresh thread id, store it, and clear the transcript.
+  // The previous rows stay in the database — a reset stops the thread, it does
+  // not delete history.
   function newChat() {
     if (loading) return;
     const ok = window.confirm(
@@ -172,15 +146,14 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
     );
     if (!ok) return;
     try {
-      const key = mode === "coach" ? COACH_KEY : ASSISTANT_KEY;
       const fresh = randomId();
-      localStorage.setItem(key, fresh);
+      localStorage.setItem(THREAD_KEY, fresh);
       threadIdRef.current = fresh;
     } catch {
       // storage unavailable — still clear the visible transcript below
       threadIdRef.current = randomId();
     }
-    setMessages([welcomeFor(mode)]);
+    setMessages([WELCOME]);
     setMultiSel({});
     setAttachedFile(null);
     setFileError(null);
@@ -259,11 +232,11 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
       // Server reconstructs the conversation from per-client memory, so we only
       // send the new message + the active thread id. Each mode keeps its own
       // namespace so the two personas stay separate.
-      const threadId = threadIdRef.current ?? getThreadId(mode);
+      const threadId = threadIdRef.current ?? getThreadId();
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, client_id: threadId, mode }),
+        body: JSON.stringify({ message, client_id: threadId }),
       });
 
       if (!res.body) throw new Error("No response body");
@@ -331,27 +304,12 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Persona toggle + manual reset */}
+      {/* One identity, plus the manual reset */}
       <div className="px-4 pt-3 border-b border-white/5">
-        <div className="flex items-center justify-center gap-2 mx-auto w-fit">
-          <div className="flex items-center gap-1 bg-white/5 rounded-lg p-0.5">
-            <button
-              onClick={() => switchMode("assistant")}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                mode === "assistant" ? "bg-indigo-600 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              💬 Assistant
-            </button>
-            <button
-              onClick={() => switchMode("coach")}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                mode === "coach" ? "bg-amber-600 text-white" : "text-gray-400 hover:text-gray-200"
-              }`}
-            >
-              🎯 Coach
-            </button>
-          </div>
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs text-gray-500">
+            Assistant and coach, one conversation
+          </p>
           <button
             onClick={newChat}
             disabled={loading}

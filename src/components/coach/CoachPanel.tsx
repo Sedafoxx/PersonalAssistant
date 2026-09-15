@@ -20,7 +20,8 @@ function localDay(): string {
   return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
 }
 
-const MOOD_LABELS = ["", "😞", "🙁", "😐", "🙂", "😄"];
+// (Mood is no longer picked from buttons here — it is inferred from the
+// conversation and recorded through the save_reflection tool.)
 
 function moodColor(m: number | null): string {
   if (m == null) return "bg-white/10";
@@ -167,23 +168,8 @@ export function CoachPanel() {
     }
   }
 
-  // Morning flow: log mood + focus, then submit to get the coach's next action.
-  async function submitMorning() {
-    if (mood == null) return;
-    await save({ answer: "" }); // preserves question; marks mood/focus saved
-    // After saving the mood/focus, refresh so the coach proposes the action.
-    load();
-  }
-
-  // Evening flow: logging the day completes the check-in AND mirrors it into the
-  // daily reflection record, so the streak, history and wins card stay in sync.
-  // Mood/energy are optional in the evening, which is why this is a separate
-  // handler — the old code reused submitMorning, whose `mood == null` guard made
-  // the evening button a silent no-op.
-  async function submitEvening() {
-    await save({ status: "done" });
-    load();
-  }
+  // (The mood/focus/reflection form is gone: check-ins and the reflection happen
+  // in the conversation now. See the hand-off card in the render below.)
 
   async function resolveAction(status: "done" | "skipped" | "failed") {
     const extra: Record<string, unknown> = { status };
@@ -697,101 +683,31 @@ export function CoachPanel() {
           )}
         </div>
 
-        {/* Phase: question */}
+        {/* The check-in is a conversation now, not a form */}
         {phase.name === "question" && (
-          <>
-            <div className="bg-[#1a1a1a] border border-white/5 rounded-xl p-4 space-y-3">
-              <p className="text-sm text-gray-100 leading-relaxed">
-                {phase.question || "What's the one thing you want to move forward today?"}
-              </p>
-
-              <div>
-                <label className="block text-xs text-gray-400 font-medium mb-1.5">Mood today</label>
-                <div className="flex gap-1.5">
-                  {[1, 2, 3, 4, 5].map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setMood(v)}
-                      className={`w-9 h-9 rounded-full flex items-center justify-center text-lg transition-colors ${
-                        mood === v ? "bg-indigo-600" : "bg-white/5 hover:bg-white/10"
-                      }`}
-                    >
-                      {MOOD_LABELS[v]}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {kind === "evening" && (
-                <div className="flex gap-1.5 items-center">
-                  <label className="text-xs text-gray-400 font-medium mr-1">Energy</label>
-                  {[1, 2, 3, 4, 5].map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setEnergy(v)}
-                      className={`text-xs px-2 py-1 rounded-full transition-colors ${
-                        energy === v ? "bg-indigo-600 text-white" : "bg-white/5 text-gray-400 hover:bg-white/10"
-                      }`}
-                    >
-                      {v}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {kind === "morning" && (
-                <div>
-                  <label className="block text-xs text-gray-400 font-medium mb-1.5">
-                    What do you want to focus on today?
-                  </label>
-                  <textarea
-                    value={focus}
-                    onChange={(e) => setFocus(e.target.value)}
-                    rows={2}
-                    placeholder="One small thing…"
-                    className="w-full bg-transparent text-sm text-gray-100 placeholder-gray-500 resize-none outline-none border border-white/10 rounded-lg px-3 py-2 focus:border-indigo-500/50 transition-colors leading-relaxed"
-                  />
-                </div>
-              )}
-
-              {kind === "evening" && (
-                <>
-                  <div>
-                    <label className="block text-xs text-gray-400 font-medium mb-1.5">
-                      What went well today?
-                    </label>
-                    <textarea
-                      value={wentWell}
-                      onChange={(e) => setWentWell(e.target.value)}
-                      rows={2}
-                      placeholder="…"
-                      className="w-full bg-transparent text-sm text-gray-100 placeholder-gray-500 resize-none outline-none border border-white/10 rounded-lg px-3 py-2 focus:border-indigo-500/50 transition-colors leading-relaxed"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-400 font-medium mb-1.5">
-                      What could be better?
-                    </label>
-                    <textarea
-                      value={couldImprove}
-                      onChange={(e) => setCouldImprove(e.target.value)}
-                      rows={2}
-                      placeholder="…"
-                      className="w-full bg-transparent text-sm text-gray-100 placeholder-gray-500 resize-none outline-none border border-white/10 rounded-lg px-3 py-2 focus:border-indigo-500/50 transition-colors leading-relaxed"
-                    />
-                  </div>
-                </>
-              )}
-
-              <button
-                onClick={kind === "morning" ? submitMorning : submitEvening}
-                disabled={saving || (kind === "morning" && mood == null)}
-                className="w-full h-9 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-medium transition-colors"
-              >
-                {saving ? "…" : kind === "morning" ? "Continue →" : "Log today ✓"}
-              </button>
-            </div>
-          </>
+          <div className="bg-[#1a1a1a] border border-white/5 rounded-xl p-4 space-y-3">
+            <p className="text-[11px] uppercase tracking-wide text-gray-500">
+              {kind === "morning" ? "Your morning" : "Your evening"}
+            </p>
+            <p className="text-sm text-gray-100 leading-relaxed">
+              {phase.question || "What's the one thing you want to move forward today?"}
+            </p>
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Mood, energy and the reflection all happen in the conversation now — say it
+              however you like and it gets recorded and tracked for you.
+            </p>
+            <button
+              onClick={() => {
+                window.location.href =
+                  kind === "evening" ? "/?tab=chat&prompt=reflection" : "/?tab=chat";
+              }}
+              className="w-full h-11 rounded-full bg-indigo-600 hover:bg-indigo-500 text-xs font-medium transition-colors"
+            >
+              {kind === "evening"
+                ? "Do my reflection in the conversation →"
+                : "Answer in the conversation →"}
+            </button>
+          </div>
         )}
 
         {/* Phase: answered (action + resolve) */}

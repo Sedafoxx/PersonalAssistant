@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runAssistant, type ChatMode } from "@/lib/chat";
+import { runAssistant } from "@/lib/chat";
 import { buildCoachContext, extractMemories } from "@/lib/coach";
 import { logChatMessages, getConversation, getThread } from "@/lib/chat-log";
 
@@ -7,10 +7,12 @@ import { logChatMessages, getConversation, getThread } from "@/lib/chat-log";
 // The client sends only the NEW user message; the server reconstructs the
 // conversation from per-client history (conversation memory) and answers with
 // full context. Memory is scoped by client_id, which the browser persists.
-// mode="coach" makes the same window act as the user's proactive life coach.
+// `mode` is accepted but ignored: the assistant and the coach are now one
+// persona and one conversation.
 export async function POST(req: NextRequest) {
-  const { message, client_id, mode } = await req.json();
-  const chatMode: ChatMode = mode === "coach" ? "coach" : "assistant";
+  // `mode` is still accepted for backwards compatibility but is ignored: both
+  // doors now resolve to the same persona and the same conversation.
+  const { message, client_id } = await req.json();
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -18,8 +20,26 @@ export async function POST(req: NextRequest) {
       try {
         const userText = String(message ?? "").trim();
 
-        // Load recent turns for this conversation and build full context.
-        const history = client_id ? await getConversation(String(client_id), 40) : [];
+        // Load recent turns for this conversation and build full context. The
+        // Assistant and the Coach used to be two threads (the legacy coach id
+        // was `${client_id}:coach`); merge them chronologically so neither
+        // history is abandoned, then keep the newest 40 for the model window.
+        const primaryId = client_id ? String(client_id) : undefined;
+        const legacyCoachId = primaryId ? `${primaryId}:coach` : undefined;
+        const [primary, legacy] = primaryId
+          ? await Promise.all([
+              getConversation(primaryId, 40),
+              legacyCoachId
+                ? getConversation(legacyCoachId, 40).catch(() => [])
+                : Promise.resolve([]),
+            ])
+          : [[] as Awaited<ReturnType<typeof getConversation>>, [] as Awaited<ReturnType<typeof getConversation>>];
+        const history = [...primary, ...legacy]
+          .sort(
+            (a, b) =>
+              new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+          )
+          .slice(-40);
         const context: { role: "user" | "assistant"; content: string }[] = [
           ...history.map((m) => ({
             role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
@@ -28,19 +48,16 @@ export async function POST(req: NextRequest) {
           { role: "user", content: userText || " " },
         ];
 
-        // For coach mode, feed the live coach context digest (goals, mood,
-        // open actions, people, per-goal notes) into the system prompt.
+        // Always feed the live coach context digest (goals, mood, open actions,
+        // people, per-goal notes) into the prompt, best-effort.
         let userContext: string | undefined;
-        if (chatMode === "coach") {
-          try {
-            userContext = await buildCoachContext();
-          } catch {
-            userContext = undefined; // coach tables may not exist yet
-          }
+        try {
+          userContext = await buildCoachContext();
+        } catch {
+          userContext = undefined; // coach tables may not exist yet
         }
 
         const text = await runAssistant(context, {
-          mode: chatMode,
           userContext,
         });
         controller.enqueue(encoder.encode(text));
@@ -56,9 +73,9 @@ export async function POST(req: NextRequest) {
           client_id ? String(client_id) : undefined
         );
 
-        // Coach mode: extract durable long-term memories from the exchange so
-        // the coach remembers what was discussed (best-effort).
-        if (chatMode === "coach" && userText && reply) {
+        // Extract durable long-term memories from the exchange so the assistant
+        // remembers what was discussed (best-effort).
+        if (userText && reply) {
           try {
             await extractMemories(userText, reply);
           } catch {
@@ -80,15 +97,26 @@ export async function POST(req: NextRequest) {
 }
 
 // GET /api/chat?client_id=<id> -> { messages: ChatMessageRow[] }.
-// The panel calls this on mount / mode change to restore the visible thread.
+// The panel calls this on mount to restore the visible thread.
 // A missing client_id is not an error: an anonymous browser simply has no
 // history, so we answer with an empty list and 200.
 export async function GET(req: NextRequest) {
   try {
     const clientId = new URL(req.url).searchParams.get("client_id");
     if (!clientId) return NextResponse.json({ messages: [] });
-    const messages = await getThread(clientId, 200);
-    return NextResponse.json({ messages });
+
+    // Merge the legacy coach thread into the restored view exactly as the POST
+    // path merges it for the model. Without this the screen would show a shorter
+    // conversation than the assistant is actually answering from, which would
+    // look like history had been lost when it had not.
+    const [primary, legacy] = await Promise.all([
+      getThread(clientId, 200),
+      getThread(`${clientId}:coach`, 200).catch(() => []),
+    ]);
+    const messages = [...primary, ...legacy].sort((a, b) =>
+      a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0
+    );
+    return NextResponse.json({ messages: messages.slice(-200) });
   } catch (err) {
     return NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
