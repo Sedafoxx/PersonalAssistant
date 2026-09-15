@@ -1,19 +1,20 @@
 import { createServiceClient } from "./supabase";
 import { createItem, updateItem, type Item } from "./db";
 import { getGoals } from "./goals";
-import { todayLocal } from "./dates";
+import { logicalDay } from "./dates";
 
 // Day-window logic for the "Today" view. Deliberately self-contained: it owns
 // a tiny local-day helper (Europe/Vienna) rather than importing coach.ts, to
 // avoid an import cycle (coach.ts already imports db.ts, and this module is
 // imported by the day API route and later by the coach planning flow).
 
-// Today's date as YYYY-MM-DD in the user's local zone (Europe/Vienna), from the
-// single shared definition in dates.ts. Formatting in the target zone rather
-// than slicing a UTC string is what keeps the day boundary correct no matter
-// where the server runs.
+// The day the user is living, from the single shared definition in dates.ts.
+//
+// This is logicalDay(), not the calendar date: before 04:00 local it is the day
+// that just ended, so a plan made at 1am is still "today" and a late reflection
+// lands on the day the user was actually awake for.
 export function localDay(date: Date = new Date()): string {
-  return todayLocal(date);
+  return logicalDay(date);
 }
 
 // A plain calendar-date string, validated so bad input never reaches the DB.

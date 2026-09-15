@@ -7,7 +7,7 @@ import { getReflection, getReflectionStreak, type ChecklistItem } from "./reflec
 import { listUpcomingEvents, createEvent } from "./calendar";
 import { getDay, getDayMetrics, listLeftovers } from "./day";
 import { getMilestonesByGoal } from "./milestones";
-import { todayLocal } from "./dates";
+import { logicalDay } from "./dates";
 import { formatForContext, upsertFact, curateTopic } from "./memory";
 
 // --- types ------------------------------------------------------------------
@@ -59,10 +59,13 @@ export interface Checkin {
 // This used to compute the day from getTimezoneOffset(), which reports the
 // SERVER's zone — on Vercel that is UTC. Between 22:00 and 24:00 UTC it
 // therefore returned yesterday's date for a user in Vienna, so evening check-ins
-// and the whole coach day key were filed a day early. todayLocal() formats in
-// the target zone instead, so every module agrees on what "today" means.
+// and the whole coach day key were filed a day early.
+//
+// It is logicalDay() now, not the calendar date: before 04:00 local this is the
+// day that just ended, so a reflection written at 1am is still counted against
+// the day it belongs to.
 export function localDay(): string {
-  return todayLocal();
+  return logicalDay();
 }
 
 // --- LLM (mirrors journal.ts reflect(): DeepSeek-safe, single user message) --

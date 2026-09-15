@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Item } from "@/lib/db";
 import { ItemDetail } from "@/components/sidebar/ItemDetail";
-import { countdownLabel } from "@/lib/dates";
+import { countdownLabel, logicalDay } from "@/lib/dates";
 
 // The Today window: the agreed tasks for the day, the auto-surfaced due /
 // overdue items, and the collapsed backlog you can pull from in one tap.
@@ -43,10 +43,11 @@ const PRIORITY_COLOR: Record<number, string> = {
   5: "bg-white/10 text-gray-500",
 };
 
+// The day the user is living, from the shared rule in dates.ts. Before 04:00
+// local this is the day that just ended, so a late night does not silently start
+// planning tomorrow's list while you are still finishing today's.
 function localDay(): string {
-  const d = new Date();
-  const off = d.getTimezoneOffset();
-  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  return logicalDay();
 }
 
 function prettyDate(day: string): string {

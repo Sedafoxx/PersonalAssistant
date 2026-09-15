@@ -83,9 +83,59 @@ export function isDueSoon(
 // server runs or how the browser's clock is set.
 export function todayLocal(date: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Vienna",
+    timeZone: TZ,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   }).format(date);
+}
+
+/** The zone every day boundary in this app is anchored to. */
+const TZ = "Europe/Vienna";
+
+/**
+ * The hour at which a new day starts, locally.
+ *
+ * Someone who is up at 1am reflecting on "today" means the day that just ended,
+ * not the one the calendar has already flipped to. Treating the small hours as
+ * the previous day is what stops a late reflection from being filed against
+ * tomorrow and leaving today's streak empty. Four is late enough for a real night
+ * owl and early enough that it never touches a normal morning.
+ */
+export const DAY_START_HOUR = 4;
+
+/** The user's LOCAL hour (0-23) in {@link TZ}. */
+function localHour(date: Date): number {
+  return Number(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: TZ,
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(date)
+  );
+}
+
+/**
+ * The day the user is LIVING, as YYYY-MM-DD — the one day function the whole app
+ * should use.
+ *
+ * Before {@link DAY_START_HOUR} this is the PREVIOUS calendar day: at 01:00 on
+ * the 16th the user is still finishing the 15th, so their reflection, their mood
+ * and their "today" all belong to the 15th. Use this wherever a day is recorded.
+ * `todayLocal()` remains for the rare place a true calendar date is meant (a due
+ * date, for instance).
+ *
+ * It exists because the app used to have several different answers to "what day
+ * is it": a UTC slice, the server's own zone, and the browser's. That is how a
+ * reflection written at 00:30 got filed on the wrong day and why a late evening
+ * reflection "would not let me reflect for the day before".
+ */
+export function logicalDay(date: Date = new Date()): string {
+  const calendar = todayLocal(date);
+  if (localHour(date) >= DAY_START_HOUR) return calendar;
+
+  const [y, m, d] = calendar.split("-").map(Number);
+  const prev = new Date(Date.UTC(y, m - 1, d));
+  prev.setUTCDate(prev.getUTCDate() - 1);
+  return prev.toISOString().slice(0, 10);
 }

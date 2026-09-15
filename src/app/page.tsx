@@ -3,25 +3,19 @@
 import { useState, useEffect } from "react";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CoachPanel } from "@/components/coach/CoachPanel";
-import { JournalPanel } from "@/components/journal/JournalPanel";
-import { ReflectionPanel } from "@/components/journal/ReflectionPanel";
 import { ListsPanel } from "@/components/lists/ListsPanel";
 import { TodayPanel } from "@/components/today/TodayPanel";
 import { StatsPanel } from "@/components/stats/StatsPanel";
 import { ItemsSidebar } from "@/components/sidebar/ItemsSidebar";
 import { setupNotifications } from "@/lib/notifications";
 
-type Tab = "chat" | "today" | "coach" | "journal" | "reflection" | "lists" | "stats";
+// Journal and Reflection are gone as tabs on purpose: journaling and the evening
+// reflection both happen in the conversation now, and the entries they produced
+// still live in the database and still feed the assistant's context. Two forms
+// asking what a conversation should ask was the whole problem.
+type Tab = "chat" | "today" | "coach" | "lists" | "stats";
 
-const TABS: Tab[] = [
-  "chat",
-  "today",
-  "coach",
-  "journal",
-  "reflection",
-  "lists",
-  "stats",
-];
+const TABS: Tab[] = ["chat", "today", "coach", "lists", "stats"];
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -108,10 +102,6 @@ export default function Home() {
             <TodayPanel />
           ) : tab === "coach" ? (
             <CoachPanel />
-          ) : tab === "journal" ? (
-            <JournalPanel />
-          ) : tab === "reflection" ? (
-            <ReflectionPanel />
           ) : tab === "lists" ? (
             <ListsPanel refreshKey={refreshKey} />
           ) : (

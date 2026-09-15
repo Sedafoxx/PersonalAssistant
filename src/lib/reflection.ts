@@ -1,5 +1,5 @@
 import { createServiceClient } from "./supabase";
-import { todayLocal } from "./dates";
+import { logicalDay } from "./dates";
 
 export interface ChecklistItem {
   id: string;
@@ -32,15 +32,12 @@ export const DEFAULT_CHECKLIST: ChecklistItem[] = [
   { id: "gratitude", label: "Noticed one good thing", done: false },
 ];
 
-// Today's date as YYYY-MM-DD in the user's zone.
+// The day a reflection belongs to, as YYYY-MM-DD.
 //
-// This used to slice a UTC ISO string, which is a different day from the
-// Europe/Vienna day between 22:00 and 24:00 UTC — so an evening reflection
-// written after midnight in Vienna was filed under the previous day, against a
-// Today window that had already rolled over. todayLocal() is the one shared
-// definition, so every module agrees.
+// logicalDay(), not the calendar date: a reflection written at 1am belongs to the
+// day the user is still finishing. See dates.ts for the rule.
 export function todayISO(): string {
-  return todayLocal();
+  return logicalDay();
 }
 
 export async function getReflection(

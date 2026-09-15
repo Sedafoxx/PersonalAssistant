@@ -684,6 +684,11 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
             description:
               'Habits they said they did today, e.g. ["move", "water"]. Matched case-insensitively against their checklist: journal, plan, screens, move, water, gratitude.',
           },
+          day: {
+            type: "string",
+            description:
+              'Which day this reflection is FOR. Omit for the normal case. Pass "yesterday" when the user is up past midnight and is reflecting on the day that just ended, or an explicit YYYY-MM-DD if they name a day.',
+          },
         },
       },
     },
@@ -1184,7 +1189,26 @@ export async function executeTool(
     }
 
     case "save_reflection": {
-      const day = localDay();
+      // The day is normally the one the user is living (see dates.ts: before
+      // 04:00 that is the day that just ended). `day` exists for the case they are
+      // explicit about it — "this is for yesterday" at 1am — because refusing a
+      // reflection just because the calendar moved on is the bug they hit.
+      const shift = (from: string, days: number): string => {
+        const [y, m, d] = from.split("-").map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        dt.setUTCDate(dt.getUTCDate() + days);
+        return dt.toISOString().slice(0, 10);
+      };
+      const dayArg = (input.day as string | undefined)?.trim().toLowerCase();
+      const day =
+        dayArg === "yesterday"
+          ? shift(localDay(), -1)
+          : dayArg === "tomorrow"
+            ? shift(localDay(), 1)
+            : isDayString(dayArg)
+              ? dayArg
+              : localDay();
+
       const wentWell = (input.went_well as string | undefined)?.trim();
       const couldImprove = (input.could_improve as string | undefined)?.trim();
       const habits = Array.isArray(input.habits)

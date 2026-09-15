@@ -85,9 +85,11 @@ export async function runNotificationRun(kind: NotifyKind) {
     if (!(await hasReflectionToday())) {
       sent += await pushAll({
         title: "Evening reflection",
-        body: "Time for your evening reflection — what went well, what could be better?",
+        body: "Time for your evening reflection — talk it through and I will record it.",
         icon: "/icon-192.png",
-        url: "/?tab=reflection",
+        // Straight into the conversation with the reflection opener pre-filled:
+        // the Reflection tab no longer exists.
+        url: "/?tab=chat&prompt=reflection",
       });
       reflectionNudge = true;
     }
@@ -110,9 +112,10 @@ export async function runNotificationRun(kind: NotifyKind) {
     if (!(await hasEntryToday())) {
       sent += await pushAll({
         title: "Daily journal",
-        body: "What happened today? Tap to capture it — voice or text.",
+        body: "What happened today? Tap to tell me — voice or text.",
         icon: "/icon-192.png",
-        url: "/?tab=journal",
+        // The Journal tab is gone; journaling is just talking now.
+        url: "/?tab=chat",
       });
       journalNudge = true;
     }

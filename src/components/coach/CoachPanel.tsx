@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { logicalDay } from "@/lib/dates";
 import type { Checkin, CheckinKind, DayPlan } from "@/lib/coach";
 
 interface MoodPoint {
@@ -14,10 +15,11 @@ type Phase =
   | { name: "answered"; checkin: Checkin }
   | { name: "error"; message: string };
 
+// The day the user is living, from the shared rule in dates.ts: before 04:00
+// local this is the day that just ended, so opening the Coach tab at 1am still
+// shows the day you are actually finishing.
 function localDay(): string {
-  const d = new Date();
-  const off = d.getTimezoneOffset();
-  return new Date(d.getTime() - off * 60000).toISOString().slice(0, 10);
+  return logicalDay();
 }
 
 // (Mood is no longer picked from buttons here — it is inferred from the
