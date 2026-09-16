@@ -29,6 +29,7 @@ import {
   searchAiNews,
   canonicalUrl,
   isRelevant,
+  isShortformSocial,
   isAiSoftwareInterest,
   type Candidate as SourceCandidate,
   type ItemKind,
@@ -874,9 +875,18 @@ export async function discoverCandidates(
       // both arrived for an interest about owning an AI initiative. `titleOnly` is
       // passed explicitly rather than inferred from candidate.kind, because at gate
       // time the raw candidate has not been labelled with its kind yet.
+      // Shortform social video never counts as an article: escaping that is the
+      // entire point of this feed.
+      if (type === "article" && isShortformSocial(candidate.url)) return false;
+
       const titleOnly = type === "podcast" || candidate.platform === "arxiv";
+      // Podcasts are held to the strictest standard of all: the TITLE must contain
+      // a word from the interest LABEL, not merely two words from a search phrase.
+      // The episode that defeated the looser rule matched "how to read more books
+      // every week" on the words "every" and "week".
+      const requireLabel = type === "podcast";
       return queries.some((q) =>
-        isRelevant(candidate, q, interest.text, titleOnly)
+        isRelevant(candidate, q, interest.text, titleOnly, requireLabel)
       );
     };
 

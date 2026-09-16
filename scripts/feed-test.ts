@@ -352,6 +352,37 @@ async function main() {
       junkHits.join("; ") || "Muon Collider/tensor-to-scalar/Pickleball absent"
     );
 
+    // Assertion: a podcast episode must name something from the interest it was
+    // found FOR. Deliberately re-implemented here rather than reusing the gate's
+    // own tokenizer, so this is an independent check and not a tautology. It is
+    // the test that catches a match made only of phrase filler: an episode that
+    // arrived for "how to read more books every week" because its title contained
+    // "every week" and nothing else.
+    const STOP_WORDS = new Set([
+      "with", "from", "that", "this", "your", "about", "into", "over", "more",
+      "best", "for", "and", "the",
+    ]);
+    const words = (text: string): Set<string> =>
+      new Set(
+        String(text ?? "")
+          .toLowerCase()
+          .split(/[^a-z0-9]+/)
+          .filter((w) => w.length >= 4 && !STOP_WORDS.has(w))
+      );
+    const unnamedPodcasts = first.candidates
+      .filter((c) => c.candidate.kind === "podcast")
+      .filter((c) => {
+        const inTitle = words(c.candidate.title ?? "");
+        for (const t of words(c.interest_text)) if (inTitle.has(t)) return false;
+        return true;
+      })
+      .map((c) => `${c.candidate.title} — for "${c.interest_text}"`);
+    check(
+      "every surfaced podcast names its own interest",
+      unnamedPodcasts.length === 0,
+      unnamedPodcasts.join("; ") || "all podcast titles name their interest"
+    );
+
     // Assertion: every interest is either accounted for with a survivor or
     // explicitly reported as having none.
     const silent = topics.filter(

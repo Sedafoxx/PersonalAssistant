@@ -84,6 +84,34 @@ export function canonicalUrl(raw: string): string {
   }
 }
 
+// --- shortform social -------------------------------------------------------
+
+// Platforms whose whole format is the short, endlessly-scrollable video the feed
+// exists to replace. A "source" is unknowable here and there is no depth to rank
+// on, so they never enter through the article door — a TikTok link turned up for
+// the reading interest and that is precisely the thing being escaped. Social
+// POSTS remain a legitimate kind on their own path (Bluesky), which is a
+// different door with a different shape.
+const SHORTFORM_HOSTS = [
+  "tiktok.com",
+  "instagram.com",
+  "facebook.com",
+  "snapchat.com",
+  "pinterest.com",
+  "threads.net",
+];
+
+/** True when the URL is shortform social video/image, never a place to read. */
+export function isShortformSocial(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+    return SHORTFORM_HOSTS.some((blocked) => host === blocked || host.endsWith(`.${blocked}`));
+  } catch {
+    // An unparseable URL is not obviously shortform; other checks will judge it.
+    return false;
+  }
+}
+
 // --- relevance --------------------------------------------------------------
 
 // Words that appear in almost every phrase and so distinguish nothing.
@@ -123,15 +151,13 @@ export function isRelevant(
   c: Candidate,
   query: string,
   interestText: string,
-  titleOnly = false
+  titleOnly = false,
+  requireLabel = false
 ): boolean {
   try {
     // Some sources are loose enough that a match anywhere in a description means
-    // nothing. Apple's episode search returned "TO CATCH A CHEATER: Why Is Her
-    // Boyfriend Secretly Booking a Hotel Every Week?!" for a relationship
-    // interest purely because some word in its blurb happened to overlap. For
-    // those sources the match must be in the TITLE. The caller decides, because
-    // at gate time the raw candidate may not carry its own kind yet.
+    // nothing, so for those the match must be in the TITLE. The caller decides,
+    // because at gate time the raw candidate may not carry its own kind yet.
     const haystackText =
       titleOnly || c.kind === "podcast"
         ? (c.title ?? "")
@@ -144,6 +170,14 @@ export function isRelevant(
     for (const t of relevanceTokens(interestText)) {
       if (haystack.has(t)) return true;
     }
+
+    // A title that names none of the labels is not evidence of fit at all, and for
+    // the loosest source that is the whole test. This is the rule that catches
+    // "TO CATCH A CHEATER: Why Is Her Boyfriend Secretly Booking a Hotel Every
+    // Week?!" for an interest in reading more books: it matched the phrase "how to
+    // read more books every week" on the words "every" and "week", which is a
+    // coincidence of English, not a recommendation.
+    if (requireLabel) return false;
 
     // Falling back to the search phrase alone is weaker, so it needs two matches
     // and at least one that is not generic — otherwise "tips for advanced
