@@ -101,9 +101,9 @@ async function main() {
     console.log("===================================================================\n");
 
     // 2. Derive interests from those signals.
-    const { interests, created, updated, retired } = await deriveInterests();
+    const { interests, created, updated, retired, missed } = await deriveInterests();
     console.log(
-      `=== DERIVED INTERESTS (created ${created}, updated ${updated}, retired ${retired}) ===`
+      `=== DERIVED INTERESTS (created ${created}, updated ${updated}, retired ${retired}, held ${missed}) ===`
     );
     for (const i of interests) {
       console.log(
@@ -182,10 +182,15 @@ async function main() {
     );
 
     // 6. A re-derivation over unchanged signals must not churn the active set.
-    check(
-      "retired is 0 on a stable re-derivation",
-      retired === 0,
-      `retired ${retired}`
+    // Retirement needs TWO consecutive misses, so a single re-derivation can
+    // never retire an area. This is a real guarantee now rather than a
+    // coincidence: before the hysteresis it flapped whenever the model
+    // re-phrased a label, which is exactly what this check caught.
+    check("a single re-derivation retires nothing", retired === 0, `retired ${retired}`);
+    console.log(
+      missed > 0
+        ? `NOTE  ${missed} active area(s) were absent this derivation and HELD (retirement needs 2 consecutive misses)`
+        : "NOTE  every active area was produced again this derivation"
     );
 
     // 7. Labels are ASCII-English; evidence may stay German.

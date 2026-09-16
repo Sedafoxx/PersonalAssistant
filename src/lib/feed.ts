@@ -57,7 +57,18 @@ export interface InterestDerivation {
   created: number;
   updated: number;
   retired: number;
+  /** Active areas that missed this derivation but were HELD because of hysteresis. */
+  missed: number;
 }
+
+/**
+ * Consecutive derivations an active area may be absent before it is deactivated.
+ *
+ * One is too few: the model re-phrases and re-balances between runs, so a single
+ * absence is drift and retiring on it made the active set flap between 11 and 12
+ * areas. Two is a change of mind.
+ */
+const MISSES_BEFORE_RETIRE = 2;
 
 const INTEREST_COLS =
   "id,slug,text,kind,weight,queries,evidence,source,active,created_at,updated_at";
@@ -506,7 +517,7 @@ export async function deriveInterests(): Promise<InterestDerivation> {
     parsed = JSON.parse(raw);
   } catch {
     // A failed call or unparseable JSON yields no changes, never an exception.
-    return { interests: await getInterests(), created: 0, updated: 0, retired: 0 };
+    return { interests: await getInterests(), created: 0, updated: 0, retired: 0, missed: 0 };
   }
 
   const db = createServiceClient();
@@ -623,6 +634,8 @@ export async function deriveInterests(): Promise<InterestDerivation> {
             queries: c.queries,
             evidence: c.evidence || null,
             active: true,
+            // It came back, so it is not drifting out.
+            miss_count: 0,
             updated_at: now,
           })
           .eq("id", existing.id);
@@ -653,33 +666,54 @@ export async function deriveInterests(): Promise<InterestDerivation> {
     }
   }
 
-  // Retire what this run no longer derives: deactivate, never delete, so the
-  // row and its evidence stay for history and getInterests() hides it.
+  // Retire what this run no longer derives — but only after a SECOND consecutive
+  // miss, because one absence is drift rather than a decision (see
+  // MISSES_BEFORE_RETIRE). Deactivate, never delete: the row, its evidence and its
+  // history stay, and getInterests() hides it.
   let retired = 0;
+  let missed = 0;
   try {
     const { data: stillActive, error } = await db
       .from("feed_interests")
-      .select("id")
+      .select("id,miss_count")
       .eq("source", "derived")
       .eq("active", true);
     if (error) throw new Error(error.message);
     const live = new Set(liveIds);
     const stale = (stillActive ?? [])
-      .map((r) => r.id as string)
-      .filter((id) => !live.has(id));
-    if (stale.length) {
+      .map((r) => ({
+        id: r.id as string,
+        missCount: Number(r.miss_count ?? 0) + 1,
+      }))
+      .filter((r) => !live.has(r.id));
+
+    const expiring = stale.filter((r) => r.missCount >= MISSES_BEFORE_RETIRE).map((r) => r.id);
+    const holding = stale.filter((r) => r.missCount < MISSES_BEFORE_RETIRE);
+
+    if (expiring.length) {
       const { error: upErr } = await db
         .from("feed_interests")
         .update({ active: false, updated_at: now })
-        .in("id", stale);
+        .in("id", expiring);
       if (upErr) throw new Error(upErr.message);
-      retired = stale.length;
+      retired = expiring.length;
+    }
+
+    // Held-back rows remember the miss, one row at a time: the count is the whole
+    // point of the hysteresis, so it cannot be a single bulk write of one value.
+    for (const row of holding) {
+      const { error: missErr } = await db
+        .from("feed_interests")
+        .update({ miss_count: row.missCount, updated_at: now })
+        .eq("id", row.id);
+      if (missErr) throw new Error(missErr.message);
+      missed++;
     }
   } catch {
     // A failed retire leaves the active set as it was; it never throws.
   }
 
-  return { interests: await getInterests(), created, updated, retired };
+  return { interests: await getInterests(), created, updated, retired, missed };
 }
 
 // --- discovery (P2) ---------------------------------------------------------
