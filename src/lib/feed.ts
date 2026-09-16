@@ -21,6 +21,7 @@ import { getTopics, getActiveFacts, formatForContext } from "./memory";
 import { getCategories, getJournalEntries } from "./journal";
 import { getItems } from "./db";
 import { getCoachMemories } from "./coach";
+import { logicalDay } from "./dates";
 import {
   validate,
   searchArticles,
@@ -1097,4 +1098,561 @@ export async function resetStoredItems(): Promise<number> {
     .select("id");
   if (error) throw new Error(error.message);
   return data?.length ?? 0;
+}
+
+// --- ranking (P3a) ----------------------------------------------------------
+
+// P2 leaves a pool of individually valid links and no judgement. This section
+// adds the judgement: a model that scores each candidate WITH a reason that
+// names something of the user's, a diversity rule that is a first-class
+// constraint rather than a tiebreaker, and a time budget.
+//
+// Why diversity is a rule and not a tiebreaker: the live P2 output returned
+// eight links that were all budget vegan meal prep (`$35. One Week. 21 Vegan
+// Meals`, `$7/Day Budget Vegan Meal Prep`, plus four articles saying the same
+// thing). Every one was valid and on-topic; a six-item feed filled with them
+// would be useless. A score alone cannot fix that — the selection has to refuse
+// the third item of the same area.
+
+export interface RankedItem {
+  item: FeedItem;
+  score: number;
+  reason: string;
+  bucket: "growth" | "fun";
+}
+
+export interface Shortlist {
+  items: RankedItem[];
+  minutes: number;
+  budgetMinutes: number;
+  droppedNoReason: number;
+  /** Candidates that survived the mechanical drops and were offered to the model. */
+  considered: number;
+  /** Candidates with a valid reason AND a score at or above the minimum. */
+  scored: number;
+  /**
+   * Always 0. The time budget informs ORDERING and is reported, but it never
+   * truncates the list — a hard stop let one 39-minute podcast starve a real run
+   * down to a single item while 14 candidates vanished uncounted. This field
+   * exists so a regression is caught by a test rather than by noticing.
+   */
+  droppedBudget: number;
+  /** The model left the candidate out entirely (an ignored instruction). */
+  droppedOmitted: number;
+  /** The model returned an entry but with a blank reason (a declined justification). */
+  droppedBlankReason: number;
+  /** The relaxed per-interest limit actually used, or null for a normal day. */
+  relaxedTo: number | null;
+  droppedLowScore: number;
+  droppedDiversity: number;
+  droppedFeedback: number;
+  /** Cheap pre-model drops: listicles/top-N and shortform social. */
+  droppedMechanical: number;
+}
+
+// How many candidates the model is shown. Bounded because one call carries the
+// whole list, and 60 is already more than a day's rotation can act on.
+const CANDIDATE_LIMIT = 60;
+
+// Anything below this is not worth an item: the rubric's "punish to 0" cases
+// land here, and so does merely mediocre content.
+const MIN_SCORE = 55;
+
+// Engagement bait and listicles, dropped mechanically BEFORE the model is
+// asked, because they are cheap to recognise and cost nothing to reject. A
+// top-N list is never what this feed is for, however well it ranks.
+//
+// The apostrophe class matters: sources spell "won't" with a straight quote and
+// with a curly one, and a bait headline that slips through on punctuation alone
+// would be exactly the item this pattern exists to stop.
+const LISTICLE_PATTERN =
+  /top\s*\d+|\d+\s+(best|ways|things)|\btier list\b|you won[’']?t believe|ultimate guide|ranked from worst/i;
+
+// Per-interest allowances. The first pass takes at most 2 items of any one
+// interest; the fallbacks relax that visibly (to 3, then 4) so a thin day can
+// still fill the feed, and so the relaxation is never invisible in the report.
+const INTEREST_LIMIT = 2;
+const INTEREST_LIMITS_RELAXED = [3, 4];
+
+// A near-duplicate title, by the same measure feed-test.ts uses on labels:
+// Jaccard overlap of lowercased non-stopword tokens of >= 4 characters. Two
+// budget-meal-prep videos with re-worded titles are the same item twice.
+const TITLE_OVERLAP = 0.5;
+
+const TITLE_STOPWORDS = new Set([
+  "with", "from", "that", "this", "your", "about", "into", "over", "more",
+  "best", "for", "and", "the",
+]);
+
+function titleTokens(text: string): Set<string> {
+  return new Set(
+    String(text ?? "")
+      .toLowerCase()
+      .replace(/[^a-z0-9äöüß\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !TITLE_STOPWORDS.has(w))
+  );
+}
+
+function titleOverlap(a: string, b: string): number {
+  const ta = titleTokens(a);
+  const tb = titleTokens(b);
+  if (!ta.size || !tb.size) return 0;
+  let shared = 0;
+  for (const t of ta) if (tb.has(t)) shared++;
+  return shared / (ta.size + tb.size - shared);
+}
+
+// Per-kind length ESTIMATE, used only when the source reported no duration.
+// It is a guess and is never presented as an exact figure.
+const ESTIMATED_MINUTES: Record<ItemKind, number> = {
+  article: 6,
+  post: 3,
+  video: 12,
+  podcast: 30,
+};
+
+// The minutes an item is assumed to cost. A real duration when the source gave
+// one, otherwise the per-kind estimate above.
+export function itemMinutes(item: FeedItem): number {
+  if (item.duration_seconds && item.duration_seconds > 0) {
+    return item.duration_seconds / 60;
+  }
+  return ESTIMATED_MINUTES[item.kind] ?? 6;
+}
+
+// The rubric, verbatim in spirit from the plan. It is deliberately blunt about
+// the two things the live output got wrong: a reason that names the user's own
+// thing, and a non-English item scoring zero however good it is.
+const RANK_SYSTEM = `You rank a specific person's candidate reading, watching and listening for one day. You are honest and severe: a high score is a promise, and a vague reason is worse than no item at all.
+
+Return ONLY JSON:
+{"ranked":[{"index":3,"score":84,"reason":"because you are preparing the salary conversation","bucket":"growth"}]}
+
+Score every candidate 0-100.
+REWARD: specificity (a named technique, a number, a concrete experience), first-hand experience, depth, something the user could act on today, and a clear tie to one of the stated interest areas.
+PUNISH TO 0: engagement bait; outrage or "shock" framing; listicles, top-N lists and tier lists; reaction or commentary with no substance; content-free hype; recap or news-dump items; and anything in a language the user does not read. The user reads GERMAN and ENGLISH ONLY — a French or Spanish item is a 0, however good it is.
+
+"reason": AT MOST 12 WORDS, and it MUST name the user's own thing — "because you are preparing the salary conversation", NOT "great career content". A generic reason is worse than no item, because it teaches the user to stop reading them.
+"bucket": "growth" when the item serves a stated goal, "fun" otherwise. Never inflate.
+Omit any candidate you cannot justify. An omitted candidate, or one with an empty reason, is dropped — it is never surfaced behind a vague label.
+"score": integer 0-100. Below 55 the item is dropped.
+Every index you return MUST be an index from the numbered candidate list, and an index must appear at most once.`;
+
+// The candidate list as the model reads it: numbered so the response can refer
+// to it by index, with the interest it was found for (which is the thing a
+// reason has to tie back to) and the shape of the item.
+function candidateBlock(items: FeedItem[], interestText: Map<string, string>): string {
+  return items
+    .map((item, index) => {
+      const interest = item.matched_interest_id
+        ? interestText.get(item.matched_interest_id)
+        : null;
+      const minutes = Math.round(itemMinutes(item));
+      const creator = item.creator ? ` · by ${item.creator}` : "";
+      const summary = (item.summary ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+      return (
+        `[${index}] ${item.title} · ${item.kind} · ${item.platform}${creator} · ~${minutes} min\n` +
+        `    interest: ${interest ?? "(unknown)"}\n` +
+        (summary ? `    summary: ${summary}\n` : "")
+      );
+    })
+    .join("");
+}
+
+// What the user has already answered, so the model can avoid recommending the
+// same thing again — and, just as importantly, so a "not for me" is remembered.
+async function feedbackBlock(): Promise<string> {
+  try {
+    const db = createServiceClient();
+    const { data, error } = await db
+      .from("feed_feedback")
+      .select("item_id,signal,at")
+      .order("at", { ascending: false })
+      .limit(40);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as { item_id: string | null; signal: string }[];
+    if (!rows.length) return "";
+    const ids = [...new Set(rows.map((r) => r.item_id).filter(Boolean))] as string[];
+    const titles = new Map<string, string>();
+    if (ids.length) {
+      const { data: items } = await db.from("feed_items").select("id,title").in("id", ids);
+      for (const r of (items ?? []) as { id: string; title: string }[]) {
+        titles.set(r.id, r.title);
+      }
+    }
+    const lines = rows.map((r) => {
+      const label = r.signal === "not_for_me" ? "not for me" : r.signal;
+      return `- [${label}] ${r.item_id ? titles.get(r.item_id) ?? r.item_id : "(unknown)"}`;
+    });
+    return `## The user's history\n${lines.join("\n")}`;
+  } catch {
+    // No history is a valid state: the model ranks on the rubric alone.
+    return "";
+  }
+}
+
+interface RawRanking {
+  index: number;
+  score: number;
+  reason: string;
+  bucket: "growth" | "fun";
+}
+
+function parseRanking(raw: string): RawRanking[] {
+  let parsed: { ranked?: { index?: unknown; score?: unknown; reason?: unknown; bucket?: unknown }[] };
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const seen = new Set<number>();
+  const out: RawRanking[] = [];
+  for (const r of parsed.ranked ?? []) {
+    const index = Number(r.index);
+    if (!Number.isInteger(index) || index < 0 || seen.has(index)) continue;
+    const n = Number(r.score);
+    if (!Number.isFinite(n)) continue;
+    // Models like to hand back "because you are preparing the salary
+    // conversation". The reason is a clause that names the user's own thing;
+    // the "because" is the UI's to add, so storing it here would render it
+    // twice.
+    const reason = String(r.reason ?? "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^because\s+/i, "");
+    const bucket = r.bucket === "fun" ? "fun" : "growth";
+    seen.add(index);
+    out.push({
+      index,
+      score: Math.max(0, Math.min(100, Math.round(n))),
+      reason,
+      bucket,
+    });
+  }
+  return out;
+}
+
+// The diversity walk over one relaxation level. Best-first, and an item is taken
+// only when its interest is below the limit AND its title is not a near-duplicate
+// of something already chosen. Rejections at this stage are droppedDiversity.
+function selectDiverse(
+  ranked: RankedItem[],
+  perInterestLimit: number,
+  cap: number
+): { chosen: RankedItem[]; dropped: number } {
+  const chosen: RankedItem[] = [];
+  const perInterest = new Map<string, number>();
+  let dropped = 0;
+
+  for (const r of ranked) {
+    if (chosen.length >= cap) break;
+
+    const interestId = r.item.matched_interest_id ?? "(none)";
+    if ((perInterest.get(interestId) ?? 0) >= perInterestLimit) {
+      dropped++;
+      continue;
+    }
+    if (chosen.some((c) => titleOverlap(c.item.title, r.item.title) >= TITLE_OVERLAP)) {
+      dropped++;
+      continue;
+    }
+
+    // NO budget check here, deliberately. The plan says a "visible time budget,
+    // not a lock — nothing is blocked, the point is awareness", and this used to
+    // be a hard stop: one 39-minute podcast filled the budget and silently starved
+    // a real run down to a single item, with 14 candidates dropped and not even
+    // counted. Length now only decides ORDER among similarly-scored items, via the
+    // band sort in buildShortlist. `droppedBudget` in the result must stay 0.
+    chosen.push(r);
+    perInterest.set(interestId, (perInterest.get(interestId) ?? 0) + 1);
+  }
+
+  return { chosen, dropped };
+}
+
+// The day's shortlist: load, drop cheaply, ask the model once, select with the
+// diversity rule and the time budget, then stamp what was chosen.
+//
+// Best-effort throughout in the style of the rest of this module: a failed model
+// call yields an empty shortlist rather than a thrown error that blanks a page.
+export async function buildShortlist(day?: string): Promise<Shortlist> {
+  const surfacedDay = day ?? logicalDay();
+  const db = createServiceClient();
+
+  // Preferences: how many items and how many minutes a day. Created on demand so
+  // a missing row is never an error — the defaults are the plan's.
+  let dailyCount = 6;
+  let dailyMinutes = 45;
+  try {
+    const { data, error } = await db
+      .from("feed_prefs")
+      .select("daily_count,daily_minutes")
+      .eq("id", 1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (data) {
+      dailyCount = Number(data.daily_count ?? dailyCount) || dailyCount;
+      dailyMinutes = Number(data.daily_minutes ?? dailyMinutes) || dailyMinutes;
+    }
+  } catch {
+    // Keep the defaults.
+  }
+
+  // The interests, so the candidate block can name what each item was found for.
+  const interestText = new Map<string, string>();
+  try {
+    const { data } = await db.from("feed_interests").select("id,text");
+    for (const r of (data ?? []) as { id: string; text: string }[]) {
+      interestText.set(r.id, r.text);
+    }
+  } catch {
+    // Without labels the prompt loses context but still ranks.
+  }
+
+  // 1. Candidates: new and validated, newest first. saved/hidden/done are
+  // excluded by the status filter, which is the same "already answered" set.
+  let candidates: FeedItem[] = [];
+  try {
+    const { data, error } = await db
+      .from("feed_items")
+      .select(ITEM_COLS)
+      .eq("status", "new")
+      .eq("validated", true)
+      .order("created_at", { ascending: false })
+      .limit(CANDIDATE_LIMIT);
+    if (error) throw new Error(error.message);
+    candidates = (data ?? []) as FeedItem[];
+  } catch {
+    return {
+      items: [],
+      minutes: 0,
+      budgetMinutes: dailyMinutes,
+      droppedNoReason: 0,
+      considered: 0,
+      scored: 0,
+      droppedBudget: 0,
+      droppedOmitted: 0,
+      droppedBlankReason: 0,
+      relaxedTo: null,
+      droppedLowScore: 0,
+      droppedDiversity: 0,
+      droppedFeedback: 0,
+      droppedMechanical: 0,
+    };
+  }
+
+  // Anything the user has already answered is never surfaced again — including
+  // an item whose status update lagged its feedback row.
+  let answered = new Set<string>();
+  try {
+    const { data, error } = await db.from("feed_feedback").select("item_id");
+    if (error) throw new Error(error.message);
+    answered = new Set(
+      ((data ?? []) as { item_id: string | null }[])
+        .map((r) => r.item_id)
+        .filter(Boolean) as string[]
+    );
+  } catch {
+    // No feedback table read: the status filter above is still the main guard.
+  }
+  const kept: FeedItem[] = [];
+  let droppedFeedback = 0;
+  for (const item of candidates) {
+    if (answered.has(item.id) || item.status !== "new") {
+      droppedFeedback++;
+      continue;
+    }
+    kept.push(item);
+  }
+
+  // 2. The two cheap mechanical drops, before any tokens are spent.
+  let droppedMechanical = 0;
+  const mechanical: FeedItem[] = [];
+  for (const item of kept) {
+    if (LISTICLE_PATTERN.test(item.title) || isShortformSocial(item.url)) {
+      droppedMechanical++;
+      continue;
+    }
+    mechanical.push(item);
+  }
+
+  if (!mechanical.length) {
+    return {
+      items: [],
+      minutes: 0,
+      budgetMinutes: dailyMinutes,
+      droppedNoReason: 0,
+      considered: 0,
+      scored: 0,
+      droppedBudget: 0,
+      droppedOmitted: 0,
+      droppedBlankReason: 0,
+      relaxedTo: null,
+      droppedLowScore: 0,
+      droppedDiversity: 0,
+      droppedFeedback,
+      droppedMechanical,
+    };
+  }
+
+  // 3. ONE model call, JSON mode, over the numbered candidates plus the rubric.
+  const history = await feedbackBlock();
+  let ranked: RawRanking[] = [];
+  try {
+    const res = await llm().chat.completions.create({
+      model: MODEL,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: RANK_SYSTEM },
+        {
+          role: "user",
+          content:
+            `${candidateBlock(mechanical, interestText)}\n` +
+            `${history ? `\n${history}\n` : ""}\n` +
+            `Rank the candidates now (JSON).`,
+        },
+      ],
+    });
+    ranked = parseRanking((res.choices[0].message.content ?? "").trim());
+  } catch {
+    // A failed call yields an empty shortlist, never a thrown error.
+    ranked = [];
+  }
+
+  // The model's own numbering is the only link back to a candidate, so an index
+  // it never saw is ignored rather than trusted.
+  const byIndex = new Map<number, FeedItem>();
+  mechanical.forEach((item, index) => byIndex.set(index, item));
+
+  let droppedBlankReason = 0;
+  let droppedLowScore = 0;
+  const scored: RankedItem[] = [];
+  for (const r of ranked) {
+    const item = byIndex.get(r.index);
+    if (!item) continue;
+    // An item returned with a blank reason is dropped — never surfaced behind a
+    // vague label.
+    if (!r.reason || !r.reason.trim()) {
+      droppedBlankReason++;
+      continue;
+    }
+    if (r.score < MIN_SCORE) {
+      droppedLowScore++;
+      continue;
+    }
+    scored.push({ item, score: r.score, reason: r.reason, bucket: r.bucket });
+  }
+
+  // Candidates the model left out entirely, counted SEPARATELY from a blank
+  // reason because the two mean different things: a blank reason is the model
+  // declining to justify an item, an omission is the model ignoring an explicit
+  // instruction. Reporting them as a single number is what hid a real run dropping
+  // 19 candidates and producing a one-item feed without saying which had happened.
+  const returned = new Set(ranked.map((r) => r.index));
+  let droppedOmitted = 0;
+  for (const [index] of byIndex) {
+    if (!returned.has(index)) droppedOmitted++;
+  }
+  const droppedNoReason = droppedBlankReason + droppedOmitted;
+  if (byIndex.size > 0 && droppedOmitted > byIndex.size / 2) {
+    console.log(
+      `  [feed] the ranking omitted ${droppedOmitted} of ${byIndex.size} candidates — the ` +
+        `prompt requires one entry per candidate, so this is the instruction being ignored, ` +
+        `not a filter rejecting them.`
+    );
+  }
+
+  // Best first, but within a score band prefer the shorter item: bands are 8
+  // points wide, so a 79 and an 84 compete on length while a 40 can never jump an
+  // 84. This is how the day lands near its time budget WITHOUT the budget ever
+  // blocking an item — length is absorbed into ordering instead.
+  const SCORE_BAND = 8;
+  scored.sort(
+    (a, b) =>
+      Math.floor(b.score / SCORE_BAND) - Math.floor(a.score / SCORE_BAND) ||
+      itemMinutes(a.item) - itemMinutes(b.item)
+  );
+
+  // 4. Diversity selection. The first pass holds every interest to 2 items; only
+  // when the list would otherwise be short is the limit relaxed, visibly, to 3
+  // and then 4 — and it stops there.
+  const cap = Math.min(dailyCount, mechanical.length);
+  let chosen: RankedItem[] = [];
+  let droppedDiversity = 0;
+  const first = selectDiverse(scored, INTEREST_LIMIT, cap);
+  chosen = first.chosen;
+  droppedDiversity = first.dropped;
+
+  const relaxationUsed: number[] = [];
+  if (chosen.length < cap) {
+    for (const limit of INTEREST_LIMITS_RELAXED) {
+      if (chosen.length >= cap) break;
+      const again = selectDiverse(scored, limit, cap);
+      // The relaxed pass may only ADD: an item already chosen stays chosen.
+      const have = new Set(chosen.map((c) => c.item.id));
+      let added = 0;
+      for (const r of again.chosen) {
+        if (have.has(r.item.id)) continue;
+        have.add(r.item.id);
+        chosen.push(r);
+        added++;
+      }
+      // Only a pass that actually put something in counts as a relaxation.
+      // Running the relaxed walk, finding it adds nothing, and then reporting a
+      // relaxed day would be a lie about how the list was built.
+      if (added) relaxationUsed.push(limit);
+    }
+  }
+
+  // 5. The budget total, reported so nothing is hand-waved.
+  const minutes = chosen.reduce((sum, r) => sum + itemMinutes(r.item), 0);
+
+  // 6. Stamp what was chosen. status stays 'new': the item is waiting, not
+  // answered. A row that was not chosen keeps its null score/reason and stays
+  // eligible for a later day — nothing is discarded.
+  const stamp = new Date().toISOString();
+  for (const r of chosen) {
+    try {
+      const { error } = await db
+        .from("feed_items")
+        .update({
+          surfaced_day: surfacedDay,
+          score: r.score,
+          reason: r.reason,
+          bucket: r.bucket,
+          updated_at: stamp,
+        })
+        .eq("id", r.item.id);
+      if (error) throw new Error(error.message);
+      r.item.surfaced_day = surfacedDay;
+    } catch {
+      // One unstamped row must not abort the shortlist it is part of.
+    }
+  }
+
+  if (relaxationUsed.length) {
+    console.log(
+      `  [feed] short list: relaxed the per-interest limit to ${relaxationUsed.join(
+        ", then "
+      )} to fill (a normal day holds every interest to ${INTEREST_LIMIT}).`
+    );
+  }
+
+  return {
+    items: chosen,
+    minutes,
+    budgetMinutes: dailyMinutes,
+    droppedNoReason,
+    considered: mechanical.length,
+    scored: scored.length,
+    droppedBudget: 0,
+    droppedOmitted,
+    droppedBlankReason,
+    relaxedTo: relaxationUsed.length ? relaxationUsed[relaxationUsed.length - 1] : null,
+    droppedLowScore,
+    droppedDiversity,
+    droppedFeedback,
+    droppedMechanical,
+  };
 }
