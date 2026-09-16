@@ -12,7 +12,7 @@ import {
   getStoredItems,
   resetStoredItems,
 } from "../src/lib/feed";
-import { canonicalUrl } from "../src/lib/feed-sources";
+import { canonicalUrl, spotifyStatus } from "../src/lib/feed-sources";
 
 // --- flags -------------------------------------------------------------------
 
@@ -92,6 +92,14 @@ async function main() {
   };
 
   try {
+    // One line, first thing: whether Spotify is configured AND whether its
+    // token endpoint actually answers. Without it, a run full of `apple`
+    // podcasts looks identical whether the keys are absent or refused.
+    const spotify = await spotifyStatus();
+    console.log(
+      `SPOTIFY  configured=${spotify.configured} token=${spotify.token} — ${spotify.detail}\n`
+    );
+
     // 1. The raw fit signals the model will read (truncated for readability).
     const signals = await gatherFitSignals();
     console.log("=== FIT SIGNALS ===================================================");

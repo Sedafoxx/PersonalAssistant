@@ -5,6 +5,7 @@
 // Prints the shortlist in FULL, with each item's reason, because that list is
 // the deliverable — the ranking itself is the thing being judged, not the count.
 import { buildShortlist, getInterests, type FeedItem, type Shortlist } from "../src/lib/feed";
+import { spotifyStatus } from "../src/lib/feed-sources";
 import { createServiceClient } from "../src/lib/supabase";
 
 // --- independent re-implementations -----------------------------------------
@@ -73,10 +74,13 @@ function printShortlist(shortlist: Shortlist, interestText: Map<string, string>)
   console.log(
     `${shortlist.items.length} item(s) · about ${Math.round(shortlist.minutes)} min ` +
       `of a ${shortlist.budgetMinutes} min budget` +
-      // The first item is always taken even when it alone exceeds the budget: a
-      // feed of zero is not a feed. Say so rather than implying compliance.
+      // The budget is AWARENESS, never a lock: it shapes the ordering and it is
+      // reported, but nothing is blocked by it. So going over is not a failure
+      // to explain away — say by how much, and say that it is not a limit.
       (shortlist.minutes > shortlist.budgetMinutes
-        ? ` (over the cap: the first item alone is longer than the day's ${shortlist.budgetMinutes} min)`
+        ? ` — ${Math.round(shortlist.minutes - shortlist.budgetMinutes)} min over the ` +
+          `${shortlist.budgetMinutes} min awareness budget, which is not a limit: ` +
+          `nothing was dropped for being long.`
         : "")
   );
   console.log(
@@ -115,6 +119,14 @@ async function main() {
   let probeItemId: string | null = null;
 
   try {
+    // One line, first thing: whether Spotify is configured AND whether its
+    // token endpoint actually answers. Without it, a feed full of `apple`
+    // podcasts looks identical whether the keys are absent or refused.
+    const spotify = await spotifyStatus();
+    console.log(
+      `SPOTIFY  configured=${spotify.configured} token=${spotify.token} — ${spotify.detail}`
+    );
+
     const db = createServiceClient();
 
     // The configured cap, read here so the test compares against the real value

@@ -475,6 +475,70 @@ async function itunesEpisodes(query: string): Promise<Candidate[]> {
   }
 }
 
+// Is the Spotify path actually usable right now?
+//
+// The one-line answer an operator needs: `searchPodcasts()` silently falls back
+// to Apple when the keys are missing OR when the client-credentials token is
+// refused, so a feed full of `apple` podcasts looks identical in both cases.
+// This asks the question out loud — and it only ever asks the token endpoint
+// when BOTH env vars are present. Neither value, nor any part of the token, is
+// ever put in the detail: only what happened and, on a failure, the HTTP status.
+export async function spotifyStatus(): Promise<{
+  configured: boolean;
+  token: "ok" | "failed" | "skipped";
+  detail: string;
+}> {
+  const id = process.env.SPOTIFY_CLIENT_ID;
+  const secret = process.env.SPOTIFY_CLIENT_SECRET;
+  if (!id || !secret) {
+    const missing = [!id && "SPOTIFY_CLIENT_ID", !secret && "SPOTIFY_CLIENT_SECRET"]
+      .filter(Boolean)
+      .join(", ");
+    return {
+      configured: false,
+      token: "skipped",
+      detail: `${missing} not set — podcasts come from keyless Apple (iTunes)`,
+    };
+  }
+  try {
+    const res = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${Buffer.from(`${id}:${secret}`).toString("base64")}`,
+      },
+      body: "grant_type=client_credentials",
+    });
+    if (!res.ok) {
+      return {
+        configured: true,
+        token: "failed",
+        detail: `keys set but the token request returned HTTP ${res.status} — falling back to Apple`,
+      };
+    }
+    const data = (await res.json()) as SpotifyToken;
+    if (!data.access_token) {
+      return {
+        configured: true,
+        token: "failed",
+        detail: "keys set, token request succeeded but returned no access_token",
+      };
+    }
+    return {
+      configured: true,
+      token: "ok",
+      detail: "keys set and a client-credentials token was issued — podcasts come from Spotify",
+    };
+  } catch {
+    // A thrown fetch is a failure like any other; say so, never why with values.
+    return {
+      configured: true,
+      token: "failed",
+      detail: "keys set but the token request could not be completed — falling back to Apple",
+    };
+  }
+}
+
 // Spotify when configured, keyless iTunes otherwise. Reports which one ran.
 // The relevance gate is applied by the caller (discoverCandidates), which is
 // the only place that also knows the interest text.

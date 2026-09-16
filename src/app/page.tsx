@@ -5,6 +5,7 @@ import { ChatPanel } from "@/components/chat/ChatPanel";
 import { CoachPanel } from "@/components/coach/CoachPanel";
 import { ListsPanel } from "@/components/lists/ListsPanel";
 import { TodayPanel } from "@/components/today/TodayPanel";
+import { FeedPanel } from "@/components/feed/FeedPanel";
 import { StatsPanel } from "@/components/stats/StatsPanel";
 import { ItemsSidebar } from "@/components/sidebar/ItemsSidebar";
 import { setupNotifications } from "@/lib/notifications";
@@ -13,9 +14,9 @@ import { setupNotifications } from "@/lib/notifications";
 // reflection both happen in the conversation now, and the entries they produced
 // still live in the database and still feed the assistant's context. Two forms
 // asking what a conversation should ask was the whole problem.
-type Tab = "chat" | "today" | "coach" | "lists" | "stats";
+type Tab = "chat" | "today" | "feed" | "coach" | "lists" | "stats";
 
-const TABS: Tab[] = ["chat", "today", "coach", "lists", "stats"];
+const TABS: Tab[] = ["chat", "today", "feed", "coach", "lists", "stats"];
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -100,6 +101,8 @@ export default function Home() {
             <ChatPanel onItemsChange={() => setRefreshKey((k) => k + 1)} />
           ) : tab === "today" ? (
             <TodayPanel />
+          ) : tab === "feed" ? (
+            <FeedPanel />
           ) : tab === "coach" ? (
             <CoachPanel />
           ) : tab === "lists" ? (
