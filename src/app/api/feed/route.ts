@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-import { buildShortlist, getInterests, type FeedItem } from "@/lib/feed";
-import { getGoals } from "@/lib/goals";
+import { buildShortlist, getInterests, withGoalTitles, type FeedItem } from "@/lib/feed";
 import { createServiceClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
@@ -55,45 +54,6 @@ async function loadPrefs(): Promise<{ daily_count: number; daily_minutes: number
     // Either way the caller gets usable numbers, never a throw.
     return defaults;
   }
-}
-
-// The heading a shortlist item is grouped under when its goal cannot be named:
-// the goal row was deleted after the item was scored, or the read failed. A
-// neutral heading is strictly better than a missing one — the UI groups BY goal,
-// so an item with no title would otherwise sit under nothing or break the page.
-const NO_GOAL_TITLE = "Everything else";
-
-// Resolve each item's attributed goal TITLE (`goal`) alongside its id
-// (`goalId`), because the UI groups the shortlist by goal heading and needs the
-// name, not just the id.
-//
-// The title is read from `getGoals`, and the shortlist's own copy is only the
-// fallback: a goal renamed since scoring shows its current name, while an item
-// whose goal row is gone still renders under a neutral heading instead of
-// breaking the page. Best-effort throughout — a failed goal read leaves every
-// item on the fallback rather than blanking the feed.
-async function withGoalTitles<T extends { goalId: string | null; goal: string }>(
-  items: T[]
-): Promise<(T & { goalTitle: string })[]> {
-  const titleById = new Map<string, string>();
-  try {
-    // Any status, not just active: an item attributed to a goal that has since
-    // been completed or archived still deserves its real name.
-    const goals = await getGoals();
-    for (const g of goals) titleById.set(g.id, g.title);
-    // getGoals() hides archived rows; ask for those too so a goal that was
-    // archived after scoring is still named rather than silently neutralised.
-    const archived = await getGoals("archived");
-    for (const g of archived) titleById.set(g.id, g.title);
-  } catch {
-    // No titles available: every item falls back below.
-  }
-
-  return items.map((r) => {
-    const fromDb = r.goalId ? titleById.get(r.goalId) : undefined;
-    const title = fromDb?.trim() || r.goal?.trim() || NO_GOAL_TITLE;
-    return { ...r, goalTitle: title };
-  });
 }
 
 // GET /api/feed -> { shortlist, saved, interests, prefs }

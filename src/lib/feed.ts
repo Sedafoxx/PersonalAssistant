@@ -31,6 +31,7 @@ import {
   canonicalUrl,
   isShortformSocial,
   isAiSoftwareInterest,
+  isNewsPlatform,
   type Candidate as SourceCandidate,
   type ItemKind,
 } from "./feed-sources";
@@ -1220,6 +1221,28 @@ export interface Shortlist {
   droppedFeedback: number;
   /** Cheap pre-model drops: shortform social only, now that the listicle regex is gone. */
   droppedMechanical: number;
+  /**
+   * How many times the ranker had to ask again because the model omitted more
+   * than half of the candidates it was given. 0 on a well-behaved day, at most 1:
+   * the retry happens ONCE, with a stricter instruction, and then the day is
+   * whatever the two attempts together produced.
+   */
+  rankRetries: number;
+  /**
+   * Candidates the ranking omitted even after the retry — the instruction to
+   * answer every index was ignored twice. Counted against the number offered, so
+   * "the model dropped a fifth of the list" is a number rather than an inference
+   * from a thin feed.
+   */
+  omittedStill: number;
+  /** How many of the day's chosen items came from the news platforms (hn, arxiv, bluesky). */
+  newsChosen: number;
+  /**
+   * News items the diversity walk refused because the day already held
+   * NEWS_CAP_PER_DAY of them. Its own number, so "news crowded out the goal
+   * content" is visible as a fact rather than felt as a quiet feed.
+   */
+  newsSkippedByCap: number;
 }
 
 // How many candidates the ranker considers in one run. Bounded because one call
@@ -1312,6 +1335,8 @@ CALIBRATION (his own, follow it literally):
 - He is ADVANCED at AI and vibecoding. Basics he already has score LOW: "Basics of Vibe Coding Explained" is a 2. Content at HIS level scores HIGH: limits, design patterns, and agents.
 - Product, gear, buy and top-N content scores LOW regardless of topic, because it does not make him smarter. "Best 6 Tennisballmaschinen" is a 1.
 - Tennis TECHNIQUE and TRAINING are relevant (Play tennis regularly); equipment lists and ball-machine reviews are not.
+- ABOUT, NOT MERELY ADJACENT. The item must BE ABOUT the goal; touching it in passing is not enough. A general multi-topic interview podcast — a show whose real subject is whichever guest happens to be on — that brushes leadership, habits or money somewhere inside it is a 2, NEVER a 3 or a 4, even though its topics overlap a goal. Concretely: an episode titled "Invest Like Warren Buffett & How To Disagree Better" is a 2 for the leadership goal, because the episode is ABOUT those two talking points and only adjacent to leadership. Reserve 3 and above for items whose own SUBJECT is the goal.
+- A BARE LINK TEACHES NOTHING. A link to someone's website or product — a landing page, a pricing page, a launch post, including every Show HN submission, which is a link plus a discussion thread — is a 1 or a 2 and never higher: the link itself has no substance, and the discussion is its only substance. Judge such an item on that discussion alone, and when there is none, score it 1.
 - Relevant: leadership and visibility; health and cooking WITHOUT product lists; reading about leadership, relationships and psyche.
 - NEWS CLAUSE (AI and agent engineering). Substantive AI and agent-engineering content that actually TEACHES him something at his level advances the goal "Owning the AI Initiative at Work" and MUST score 3 or higher, with that goal named in "goal" and referenced in the reason. His level means: agent architecture and how a system is put together; design patterns for agents and LLM applications; the LIMITS of the technology and when it fails; evaluation, evals and how you know it works; tooling and the real mechanics of building; and post-mortems or case studies of how a real initiative was made to work inside a company. Score 2 the things that teach him nothing: funding rounds, model-release announcements, benchmark marketing, hype and industry gossip. Concretely — 4: "How we redesigned our agent's tool-calling to cut retries by 60%, with the eval harness we built to prove it" (agent architecture + evaluation, owned inside a real company). 2: "OpenAI raises $40B at a $300B valuation" (a funding round; it teaches him nothing about owning the initiative).
 - Score 2 or lower when an item moves him toward NONE of his goals, however well made it is.
@@ -1321,6 +1346,79 @@ CALIBRATION (his own, follow it literally):
 "reason": AT MOST 12 WORDS, ONE sentence, and it MUST name the goal (or the milestone) it serves — "design patterns for agents, past the basics he already has", NOT "great content". A generic reason is worse than no item, because it teaches him to stop reading them.
 Omit any candidate you cannot justify. An omitted candidate, a candidate with no goal, or one with an empty reason is dropped — it is never surfaced behind a vague label.
 Every index you return MUST be an index from the numbered candidate list, and an index must appear at most once.`;
+
+// The retry instruction, used ONLY when the first attempt left out more than
+// half of the candidates. It is the same rubric — nothing about the judgement
+// changes — with the one rule the model ignored stated as its own demand: COVER
+// EVERY INDEX. Score 0 is allowed here as the honest answer for a candidate that
+// is a flat rejection, because the failure being fixed was the model staying
+// silent rather than the model scoring low: an index with a score of 0 and a
+// one-sentence reason is a decision that can be counted, and an absent index is
+// not. The scale above still applies to everything else, and the caller drops
+// anything under the threshold either way.
+const RANK_RETRY_SYSTEM = `${RANK_SYSTEM}
+
+COVERAGE IS MANDATORY THIS TIME. The previous answer left out more than half of the candidates it was given, and a candidate you stay silent about is a candidate nobody can decide about. So:
+- Every index in the numbered candidate list MUST appear in "ranked" EXACTLY ONCE. Not most of them: every one.
+- Every entry MUST have an INTEGER score and a ONE-SENTENCE reason that names the goal (or the milestone) it serves — even when the score is low.
+- If a candidate moves him toward none of his goals, do NOT omit it: score it 0 and say in one sentence WHY it is a rejection (gear, marketing, below his level, wrong language, not a goal of his). 0 is a legitimate answer — silence is not.
+- Use 1-5 exactly as the rubric above defines it. 0 means "rejected outright" and nothing else.`;
+
+// The indices of the candidate list a ranking left unanswered, or answered with
+// an empty reason — the two are the same failure here: no decision the caller can
+// use. Counted against the ORIGINAL candidate indices, never against the model's
+// own numbering.
+function omittedIndices(ranked: RawRanking[], indices: Iterable<number>): number[] {
+  const decided = new Set<number>();
+  for (const r of ranked) {
+    if (r.reason && r.reason.trim()) decided.add(r.index);
+  }
+  const out: number[] = [];
+  for (const index of indices) if (!decided.has(index)) out.push(index);
+  return out;
+}
+
+// The heading a shortlist item is grouped under when its goal cannot be named:
+// the goal row was deleted after the item was scored, or the read failed. A
+// neutral heading is strictly better than a missing one — the UI groups BY goal,
+// so an item with no title would otherwise sit under nothing or break the page.
+export const NO_GOAL_TITLE = "Everything else";
+
+// Resolve each item's attributed goal TITLE (`goal`) alongside its id
+// (`goalId`), because the UI groups the shortlist by goal heading and needs the
+// name, not just the id. It lives HERE rather than in one route because BOTH
+// read paths need it: /api/feed, and /api/feed/refresh, whose response would
+// otherwise carry goalTitle undefined and drop every goal heading until the tab
+// was reloaded.
+//
+// The title is read from `getGoals`, and the shortlist's own copy is only the
+// fallback: a goal renamed since scoring shows its current name, while an item
+// whose goal row is gone still renders under a neutral heading instead of
+// breaking the page. Best-effort throughout — a failed goal read leaves every
+// item on the fallback rather than blanking the feed.
+export async function withGoalTitles<T extends { goalId: string | null; goal: string }>(
+  items: T[]
+): Promise<(T & { goalTitle: string })[]> {
+  const titleById = new Map<string, string>();
+  try {
+    // Any status, not just active: an item attributed to a goal that has since
+    // been completed or archived still deserves its real name.
+    const goals = await getGoals();
+    for (const g of goals) titleById.set(g.id, g.title);
+    // getGoals() hides archived rows; ask for those too so a goal that was
+    // archived after scoring is still named rather than silently neutralised.
+    const archived = await getGoals("archived");
+    for (const g of archived) titleById.set(g.id, g.title);
+  } catch {
+    // No titles available: every item falls back below.
+  }
+
+  return items.map((r) => {
+    const fromDb = r.goalId ? titleById.get(r.goalId) : undefined;
+    const title = fromDb?.trim() || r.goal?.trim() || NO_GOAL_TITLE;
+    return { ...r, goalTitle: title };
+  });
+}
 
 // The goals and their OPEN milestones, as the model reads them. This IS the
 // rubric: the interests are only discovery sources now, so the goals are what a
@@ -1434,23 +1532,46 @@ function parseRanking(raw: string): RawRanking[] {
   return out;
 }
 
+// THE NEWS CAP: at most this many of the day's chosen items may come from the
+// news platforms (hn, arxiv, bluesky) combined. Not a comment about news being
+// bad — it is a comment about what a GOAL feed is: HN, arXiv and Bluesky are
+// plentiful, high-scoring and cheap to produce, so without a hard ceiling they
+// win the selection outright and the one item that moves an actual goal gets
+// crowded out by six interesting links. Two, enforced in the walk below itself
+// so no later pass can put a third one back.
+const NEWS_CAP_PER_DAY = 2;
+
 // The diversity walk over one relaxation level. Best-first, and an item is taken
-// only when its interest is below the limit AND its title is not a near-duplicate
-// of something already chosen. Rejections at this stage are droppedDiversity.
+// only when its interest is below the limit, the day holds fewer than its news
+// allowance, AND its title is not a near-duplicate of something already chosen.
+// Rejections at this stage are droppedDiversity, except a news rejection, which
+// is counted on its own as newsSkippedByCap.
 function selectDiverse(
   ranked: RankedItem[],
   perInterestLimit: number,
   cap: number
-): { chosen: RankedItem[]; dropped: number } {
+): { chosen: RankedItem[]; dropped: number; newsSkipped: number } {
   const chosen: RankedItem[] = [];
   const perInterest = new Map<string, number>();
   let dropped = 0;
+  // Both counters are about the CHOSEN list, not the offered one, because the cap
+  // is a statement about what the day ends up containing.
+  let newsChosen = 0;
+  let newsSkipped = 0;
 
   for (const r of ranked) {
     if (chosen.length >= cap) break;
 
     const interestId = r.item.matched_interest_id ?? "(none)";
     if ((perInterest.get(interestId) ?? 0) >= perInterestLimit) {
+      dropped++;
+      continue;
+    }
+    // The news cap, applied INSIDE the walk so the relaxation passes below (which
+    // re-run this same walk) cannot undo it: a third news item with the slack of a
+    // relaxed interest limit is exactly the crowding-out this rule exists to stop.
+    if (isNewsPlatform(r.item.platform) && newsChosen >= NEWS_CAP_PER_DAY) {
+      newsSkipped++;
       dropped++;
       continue;
     }
@@ -1467,9 +1588,10 @@ function selectDiverse(
     // band sort in buildShortlist. `droppedBudget` in the result must stay 0.
     chosen.push(r);
     perInterest.set(interestId, (perInterest.get(interestId) ?? 0) + 1);
+    if (isNewsPlatform(r.item.platform)) newsChosen++;
   }
 
-  return { chosen, dropped };
+  return { chosen, dropped, newsSkipped };
 }
 
 // A candidate the model scored. `score` is the integer 1-5 and `goal`/`goalId`
@@ -1493,6 +1615,10 @@ export interface ScoreResult {
   /** Returned with a score and reason but attributed to no active goal. */
   droppedNoGoal: number;
   droppedLowScore: number;
+  /** 0 or 1: the model omitted more than half the candidates and was asked once more. */
+  retries: number;
+  /** Candidates still unanswered after the retry — the omission that survived it. */
+  omittedStill: number;
 }
 
 export interface ScoreOptions {
@@ -1525,6 +1651,8 @@ export async function scoreCandidates(
     droppedOmitted: 0,
     droppedNoGoal: 0,
     droppedLowScore: 0,
+    retries: 0,
+    omittedStill: 0,
   };
   if (!candidates.length) return empty;
 
@@ -1536,27 +1664,66 @@ export async function scoreCandidates(
   const byIndex = new Map<number, FeedItem>();
   candidates.forEach((item, index) => byIndex.set(index, item));
 
-  let ranked: RawRanking[] = [];
-  try {
-    const res = await llm().chat.completions.create({
-      model: MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: RANK_SYSTEM },
-        {
-          role: "user",
-          content:
-            `${goalsBlock(goals)}\n\n` +
-            `${candidateBlock(candidates, interestText)}\n` +
-            `${history ? `\n${history}\n` : ""}\n` +
-            `Rank the candidates now (JSON).`,
-        },
-      ],
-    });
-    ranked = parseRanking((res.choices[0].message.content ?? "").trim());
-  } catch {
-    // A failed call yields nothing scored, never a thrown error.
-    ranked = [];
+  // The ONE model call, factored out so the retry below is the IDENTICAL path
+  // with a stricter instruction and nothing else changed — same numbered
+  // candidates, same rubric, same goals. A failed call yields nothing, never a
+  // throw.
+  const askModel = async (system: string): Promise<RawRanking[]> => {
+    try {
+      const res = await llm().chat.completions.create({
+        model: MODEL,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: system },
+          {
+            role: "user",
+            content:
+              `${goalsBlock(goals)}\n\n` +
+              `${candidateBlock(candidates, interestText)}\n` +
+              `${history ? `\n${history}\n` : ""}\n` +
+              `Rank the candidates now (JSON).`,
+          },
+        ],
+      });
+      return parseRanking((res.choices[0].message.content ?? "").trim());
+    } catch {
+      // A failed call yields nothing scored, never a thrown error.
+      return [];
+    }
+  };
+
+  let ranked = await askModel(RANK_SYSTEM);
+  let retries = 0;
+
+  // RETRY ON OMISSION. Silence is not a judgement: an index the model left out is
+  // a candidate nobody can decide about, and it used to be invisible — a run that
+  // dropped 19 of 40 looked exactly like a genuinely thin day. When the first
+  // attempt omits MORE THAN HALF of the candidates, ask ONCE more with an
+  // instruction that demands every index exactly once, with an integer score and
+  // a one-sentence reason, where 0 is the honest answer for a rejection.
+  let omitted = omittedIndices(ranked, byIndex.keys());
+  if (byIndex.size > 0 && omitted.length > byIndex.size / 2) {
+    retries = 1;
+    console.log(
+      `  [feed] the ranking omitted ${omitted.length} of ${byIndex.size} candidates — asking ` +
+        `ONCE more, requiring every index to appear exactly once with an integer score and a ` +
+        `one-sentence reason (0 is allowed for a rejection).`
+    );
+    const second = await askModel(RANK_RETRY_SYSTEM);
+
+    // MERGE, don't replace: an index answered in EITHER attempt is used, so a
+    // retry that fixes the omissions cannot silently discard a good judgement the
+    // first attempt made. The first attempt wins where it decided; the second is
+    // taken only for an index it omitted or left without a reason.
+    const merged = new Map<number, RawRanking>();
+    for (const r of second) merged.set(r.index, r);
+    for (const r of ranked) {
+      const prior = merged.get(r.index);
+      if (!prior || (r.reason && r.reason.trim())) merged.set(r.index, r);
+    }
+    ranked = [...merged.values()].sort((a, b) => a.index - b.index);
+
+    omitted = omittedIndices(ranked, byIndex.keys());
   }
 
   // The goal title the model named, mapped to the user's own id. Matching is
@@ -1594,16 +1761,20 @@ export async function scoreCandidates(
   // instruction. Reporting them as a single number is what hid a real run
   // dropping 19 candidates and producing a one-item feed without saying which
   // had happened.
-  const returned = new Set(ranked.map((r) => r.index));
-  let droppedOmitted = 0;
-  for (const [index] of byIndex) {
-    if (!returned.has(index)) droppedOmitted++;
-  }
-  if (byIndex.size > 0 && droppedOmitted > byIndex.size / 2) {
+  //
+  // Counted from the FINAL ranking, after the retry above and its merge, so
+  // droppedOmitted is what SURVIVED the retry rather than what triggered it: a
+  // retry that recovered every candidate leaves 0 here, and a retry that did not
+  // leaves a number that says so.
+  const droppedOmitted = omitted.length;
+  if (droppedOmitted > 0) {
     console.log(
-      `  [feed] the ranking omitted ${droppedOmitted} of ${byIndex.size} candidates — the ` +
-        `prompt requires one entry per candidate, so this is the instruction being ignored, ` +
-        `not a filter rejecting them.`
+      `  [feed] the ranking omitted ${droppedOmitted} of ${byIndex.size} candidates` +
+        `${
+          retries
+            ? " even after the retry"
+            : " — the prompt requires one entry per candidate, so this is the instruction being ignored, not a filter rejecting them"
+        }.`
     );
   }
 
@@ -1614,6 +1785,8 @@ export async function scoreCandidates(
     droppedOmitted,
     droppedNoGoal,
     droppedLowScore: 0,
+    retries,
+    omittedStill: droppedOmitted,
   };
 }
 
@@ -1715,6 +1888,10 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
       droppedDiversity: 0,
       droppedFeedback: 0,
       droppedMechanical: 0,
+      rankRetries: 0,
+      omittedStill: 0,
+      newsChosen: 0,
+      newsSkippedByCap: 0,
     };
   }
 
@@ -1773,6 +1950,10 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
       droppedDiversity: 0,
       droppedFeedback,
       droppedMechanical,
+      rankRetries: 0,
+      omittedStill: 0,
+      newsChosen: 0,
+      newsSkippedByCap: 0,
     };
   }
 
@@ -1833,9 +2014,14 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
   const cap = Math.min(dailyCount, scored.length);
   let chosen: RankedItem[] = [];
   let droppedDiversity = 0;
+  // How many news items the walk refused for the cap. Accumulated across the
+  // passes because each pass re-walks the same list: a news item the first pass
+  // refused for the cap is still refused by the relaxed pass it re-appears in.
+  let newsSkippedByCap = 0;
   const first = selectDiverse(scored, INTEREST_LIMIT, cap);
   chosen = first.chosen;
   droppedDiversity = first.dropped;
+  newsSkippedByCap += first.newsSkipped;
 
   const relaxationUsed: number[] = [];
   if (chosen.length < cap) {
@@ -1851,6 +2037,11 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
         chosen.push(r);
         added++;
       }
+      // The relaxed limit loosens the INTEREST allowance, never the news cap:
+      // re-running the walk means the cap is applied again from the chosen list
+      // this pass produced, so a pass that would have added a third news item
+      // simply does not, and says so.
+      newsSkippedByCap += again.newsSkipped;
       // Only a pass that actually put something in counts as a relaxation.
       // Running the relaxed walk, finding it adds nothing, and then reporting a
       // relaxed day would be a lie about how the list was built.
@@ -1893,6 +2084,17 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
     );
   }
 
+  // How many of the day's items actually came from the news platforms, counted
+  // from the CHOSEN list rather than from the cap, so the two numbers together
+  // read as a fact: "2 of 6 were news, 3 more were held back by the cap".
+  const newsChosen = chosen.filter((r) => isNewsPlatform(r.item.platform)).length;
+  if (newsSkippedByCap > 0) {
+    console.log(
+      `  [feed] news cap: ${newsChosen} news item(s) chosen, ${newsSkippedByCap} held back ` +
+        `(at most ${NEWS_CAP_PER_DAY} of the day may come from hn, arxiv and bluesky combined).`
+    );
+  }
+
   return {
     items: chosen,
     minutes,
@@ -1908,5 +2110,9 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
     droppedDiversity,
     droppedFeedback,
     droppedMechanical,
+    rankRetries: result.retries,
+    omittedStill: result.omittedStill,
+    newsChosen,
+    newsSkippedByCap,
   };
 }

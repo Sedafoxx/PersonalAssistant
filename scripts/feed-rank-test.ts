@@ -109,6 +109,14 @@ function printShortlist(shortlist: Shortlist, interestText: Map<string, string>)
       `no-goal/threshold not surfaced · low-score=${shortlist.droppedLowScore} ` +
       `diversity=${shortlist.droppedDiversity}`
   );
+  // P5d, reported as three facts of their own rather than folded into the drop
+  // counts: how often the ranker had to ask the model again for full coverage,
+  // how many candidates were STILL unanswered after that, and how much of the
+  // day is news. The last one is the whole point of the news cap — a goal feed
+  // whose day is six HN links is not a goal feed.
+  console.log(`NOTE retries-used: ${shortlist.rankRetries}`);
+  console.log(`NOTE candidates-still-omitted: ${shortlist.omittedStill}`);
+  console.log(`NOTE news-chosen: ${shortlist.newsChosen}`);
   console.log("");
 
   // Group by GOAL, preserving the order in which the best-scoring items appear
@@ -245,20 +253,31 @@ async function main() {
       vibe ? `score ${vibe.score}` : "omitted (counts as <= 2 only if truly dropped)"
     );
 
-    // 2. 'Best 6 Tennisballmaschinen' is gear/top-N content: at most 2...
+    // 2. 'Best 6 Tennisballmaschinen' is gear/top-N content: at most 2 — where
+    //    an OMITTED candidate counts, because omission is not surfaced either
+    //    and dropping it is the outcome this case actually wants. The two
+    //    outcomes are kept APART in the message, so "scored at most 2" and
+    //    "omitted entirely by the model" are never reported as the same thing.
     const tennis = byTitle.get(probeTitles[1]);
+    const tennisOutcome = tennis
+      ? `scored ${tennis.score}`
+      : "omitted entirely by the model (never scored)";
     check(
-      `calibration: "${probeTitles[1]}" scores <= 2`,
-      !!tennis && tennis.score <= 2,
-      tennis ? `score ${tennis.score}` : "omitted"
+      `calibration: "${probeTitles[1]}" scores <= 2 (omitted counts as not surfaced)`,
+      !tennis || tennis.score <= 2,
+      tennisOutcome
     );
     // ...and it never clears the threshold, so it cannot be surfaced. The
     // threshold is 3, applied here rather than imported, so this stays a check.
+    // An omitted candidate satisfies this too — it is not surfaced — and the
+    // message says WHICH of the two happened.
     const MIN_SURFACED_SCORE = 3;
     check(
       `calibration: "${probeTitles[1]}" is not surfaced (score < ${MIN_SURFACED_SCORE})`,
       !tennis || tennis.score < MIN_SURFACED_SCORE,
-      tennis ? `score ${tennis.score}` : "omitted — never surfaced"
+      tennis
+        ? `scored ${tennis.score} — below ${MIN_SURFACED_SCORE}, so not surfaced`
+        : "omitted entirely by the model — not surfaced (never scored)"
     );
 
     // --- the junk that survived the old lexical gate ------------------------

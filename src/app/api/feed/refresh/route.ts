@@ -5,6 +5,7 @@ import {
   deriveInterests,
   discoverCandidates,
   saveCandidates,
+  withGoalTitles,
   type DiscoveryStats,
 } from "@/lib/feed";
 import { createServiceClient } from "@/lib/supabase";
@@ -93,6 +94,11 @@ async function runRefresh() {
   let shortlist = null as Awaited<ReturnType<typeof buildShortlist>> | null;
   try {
     shortlist = await buildShortlist();
+    // The same goal-title resolution /api/feed does, through the same function.
+    // The tab renders the refresh response DIRECTLY, so without this every item
+    // would come back with goalTitle undefined and the goal headings — the whole
+    // unit of the feed — would disappear until the page was reloaded.
+    shortlist.items = await withGoalTitles(shortlist.items);
     stages.shortlist = { ok: true, detail: `${shortlist.items.length} item(s) surfaced` };
   } catch (err) {
     stages.shortlist = { ok: false, detail: (err as Error).message };

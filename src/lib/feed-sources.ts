@@ -553,10 +553,39 @@ export async function searchPodcasts(query: string): Promise<PodcastSearch> {
 
 // --- AI news (all keyless) --------------------------------------------------
 
+// The concepts the news sources are queried with — deliberately NOT the user's
+// interest phrases (P5d rule 1). HN's search matched an interest phrase so
+// loosely that a query built from one returned `Launch HN: Satchel (YC S18)` and
+// `Tell HN: My early access eBook …`, while the same API asked for an
+// architecture phrase returned actual agent-architecture stories. WHERE to look
+// is a discovery decision and is curated here in code; WHAT is worth reading
+// stays the model's judgement, which is why these are concepts and not a filter.
+export const NEWS_CONCEPTS = [
+  "agent architecture patterns",
+  "LLM evaluation and evals",
+  "context engineering and retrieval",
+  "prompt engineering in production",
+  "AI initiative enterprise adoption",
+  "coding agent tooling and MCP",
+  "RAG architecture",
+  "AI reliability failure postmortems",
+];
+
+// The three keyless news sources, named in one place so the ranking path can
+// treat them as a group (P5d rule 4: at most 2 of the day's items may be news).
+export const NEWS_PLATFORMS = ["hn", "arxiv", "bluesky"] as const;
+
+export function isNewsPlatform(platform: string): boolean {
+  return (NEWS_PLATFORMS as readonly string[]).includes(platform);
+}
+
 async function hackerNews(query: string): Promise<Candidate[]> {
   try {
     const res = await safeFetch(
-      `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=5&numericFilters=points>50`
+      // points>150, not points>50: at 50 the list filled with launch-day posts
+      // and weekend experiments, which is exactly what the rubric then has to
+      // score down. A well-received story is the floor for being considered.
+      `https://hn.algolia.com/api/v1/search?query=${encodeURIComponent(query)}&tags=story&hitsPerPage=5&numericFilters=points>150`
     );
     if (!res || !res.ok) return [];
     const data = (await res.json()) as {
@@ -572,8 +601,11 @@ async function hackerNews(query: string): Promise<Candidate[]> {
     for (const h of data.hits ?? []) {
       const title = clean(h.title);
       if (!title) continue;
+      const discussion = h.objectID
+        ? `https://news.ycombinator.com/item?id=${h.objectID}`
+        : null;
       // Ask-HN style stories have no external URL; link to the discussion.
-      const url = h.url ?? (h.objectID ? `https://news.ycombinator.com/item?id=${h.objectID}` : "");
+      const url = h.url ?? discussion ?? "";
       if (!url) continue;
       out.push({
         url: canonicalUrl(url),
@@ -581,7 +613,11 @@ async function hackerNews(query: string): Promise<Candidate[]> {
         platform: "hn",
         title,
         creator: h.author ? clean(h.author) : null,
-        summary: null,
+        // The comments usually carry the substance of an HN story, and the
+        // discussion is a different link from the article, so it rides along in
+        // the summary — the one field both the ranker and the UI read. For a
+        // story whose URL already IS the discussion there is nothing to add.
+        summary: h.url && discussion ? `HN discussion: ${discussion}` : null,
         published_at: isoDate(h.created_at),
         duration_seconds: null,
         image_url: null,
@@ -696,18 +732,49 @@ export function isAiSoftwareInterest(interestText: string): boolean {
   return AI_SOFTWARE_TOKENS.some((t) => words.has(t));
 }
 
-// AI/signal news across three keyless sources, each independently best-effort
-// so one outage cannot empty the other two. arXiv is conditional: it is only
-// asked when the interest is actually an AI/software subject.
+// One sweep of the concept list across the three keyless news sources. The
+// sweep is INTEREST-INDEPENDENT: it is the same work whoever asks, so without
+// the memo below the per-interest, per-query discovery loop would repeat the
+// identical sweep for every interest and query of a run. The short TTL keeps a
+// long-lived dev server from serving stale news while a cron run still pays for
+// the sweep once.
+const NEWS_SWEEP_TTL_MS = 10 * 60 * 1000;
+const newsSweeps = new Map<string, { at: number; items: Promise<Candidate[]> }>();
+
+function newsSweep(includeArxiv: boolean): Promise<Candidate[]> {
+  const key = includeArxiv ? "arxiv" : "no-arxiv";
+  const now = Date.now();
+  const hit = newsSweeps.get(key);
+  if (hit && now - hit.at < NEWS_SWEEP_TTL_MS) return hit.items;
+
+  // Each source is independently best-effort (they never throw), so one outage
+  // cannot empty the concepts the other two answered.
+  const items = (async () => {
+    const out: Candidate[] = [];
+    for (const concept of NEWS_CONCEPTS) {
+      const [hn, papers, posts] = await Promise.all([
+        hackerNews(concept),
+        includeArxiv ? arxiv(concept) : Promise.resolve([] as Candidate[]),
+        bluesky(concept),
+      ]);
+      out.push(...hn, ...papers, ...posts);
+    }
+    return out;
+  })();
+
+  newsSweeps.set(key, { at: now, items });
+  return items;
+}
+
+// AI/signal news across three keyless sources, queried with the curated concept
+// list rather than with the caller's interest phrase (P5d rule 1). The `query`
+// argument is kept because the caller still decides whether arXiv — pinned to
+// the cs categories — is asked at all; it no longer reaches the sources.
 export async function searchAiNews(
   query: string,
   opts: { includeArxiv?: boolean } = {}
 ): Promise<Candidate[]> {
   const includeArxiv = opts.includeArxiv !== false;
-  const [hn, papers, posts] = await Promise.all([
-    hackerNews(query),
-    includeArxiv ? arxiv(query) : Promise.resolve([] as Candidate[]),
-    bluesky(query),
-  ]);
-  return [...hn, ...papers, ...posts];
+  void query;
+  return newsSweep(includeArxiv);
 }
