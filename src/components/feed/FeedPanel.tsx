@@ -42,6 +42,12 @@ interface RankedItem {
   score: number;
   reason: string;
   bucket: Bucket;
+  /** The goal the item was attributed to, as the ranker named it. */
+  goal: string;
+  /** The id of that goal, or null when the model named no active goal. */
+  goalId: string | null;
+  /** That goal's TITLE, resolved server-side; the group heading. */
+  goalTitle: string;
 }
 
 interface Shortlist {
@@ -229,6 +235,21 @@ export function FeedPanel() {
     [view, answered]
   );
 
+  // The shortlist grouped under its goal heading. A goal is the product's unit
+  // of judgement, so the day reads as "this serves that goal" rather than as a
+  // stream. Groups keep the ranker's order (best score first) and so do the
+  // items within a group; a goal appears at the position of its best item.
+  const groups = useMemo(() => {
+    const byTitle = new Map<string, RankedItem[]>();
+    for (const r of items) {
+      const title = r.goalTitle || "Everything else";
+      const list = byTitle.get(title);
+      if (list) list.push(r);
+      else byTitle.set(title, [r]);
+    }
+    return [...byTitle.entries()].map(([title, list]) => ({ title, items: list }));
+  }, [items]);
+
   const minutes = Math.round(view?.shortlist.minutes ?? 0);
   const budgetMinutes = view?.shortlist.budgetMinutes ?? 0;
   const count = items.length;
@@ -253,6 +274,9 @@ export function FeedPanel() {
               </h2>
               <p className="text-xs text-gray-500 mt-0.5">
                 Links open in a new tab. Nothing plays on its own.
+              </p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Only what scores 3 or more, grouped by the goal it serves.
               </p>
             </div>
           </div>
@@ -296,18 +320,29 @@ export function FeedPanel() {
               </button>
             </div>
           ) : (
-            <ul className="space-y-2">
-              {items.map((r) => (
-                <li key={r.item.id}>
-                  <FeedCard
-                    ranked={r}
-                    onOpen={() => window.open(r.item.url, "_blank", "noopener,noreferrer")}
-                    onSave={() => send(r.item.id, "save")}
-                    onDismiss={() => send(r.item.id, "not_for_me")}
-                  />
-                </li>
+            <div className="space-y-4">
+              {groups.map((group) => (
+                <div key={group.title}>
+                  <h3 className="text-[11px] uppercase tracking-wide text-gray-500 px-1 mb-2">
+                    {group.title}
+                  </h3>
+                  <ul className="space-y-2">
+                    {group.items.map((r) => (
+                      <li key={r.item.id}>
+                        <FeedCard
+                          ranked={r}
+                          onOpen={() =>
+                            window.open(r.item.url, "_blank", "noopener,noreferrer")
+                          }
+                          onSave={() => send(r.item.id, "save")}
+                          onDismiss={() => send(r.item.id, "not_for_me")}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
-            </ul>
+            </div>
           )}
         </section>
 
@@ -408,7 +443,7 @@ function FeedCard({
   onSave: () => void;
   onDismiss: () => void;
 }) {
-  const { item, reason, bucket } = ranked;
+  const { item, reason, bucket, score } = ranked;
   const host = hostLabel(item.url);
 
   return (
@@ -430,6 +465,13 @@ function FeedCard({
           className={`text-[10px] px-1.5 py-0.5 rounded border ${BUCKET_STYLE[bucket]}`}
         >
           {bucket}
+        </span>
+        {/* The 1-5 score, as a chip, right beside the bucket tag. */}
+        <span
+          title={`Scores ${score} of 5 for this goal`}
+          className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-gray-300 tabular-nums"
+        >
+          {score}/5
         </span>
         {item.creator && (
           <span className="text-[11px] text-gray-500 truncate">{item.creator}</span>

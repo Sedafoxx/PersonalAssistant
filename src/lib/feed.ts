@@ -29,7 +29,6 @@ import {
   searchPodcasts,
   searchAiNews,
   canonicalUrl,
-  isRelevant,
   isShortformSocial,
   isAiSoftwareInterest,
   type Candidate as SourceCandidate,
@@ -845,13 +844,12 @@ export async function discoverCandidates(
         const kind: ItemKind =
           type === "article" ? "article" : type === "video" ? "video" : candidate.kind;
         t.found++;
-        // The relevance gate: a link that exists but does not fit is noise, and
-        // the point of the feed is fit. Counted separately from a dead link.
-        if (!keep(candidate, type)) {
-          t.droppedRelevance++;
-          stats.rejectedRelevance++;
-          continue;
-        }
+        // NO relevance gate here any more (P5). Ingest does not filter by words:
+        // this feed is judged on MEANING by the model at ranking time, and a
+        // keyword list cannot tell "basics" (which the user is past) from
+        // "basics" (which he needs). Everything a source returns is carried
+        // forward to validation, and only the VALIDATION gate below can reject
+        // it. The model, not a regex, decides what fits.
         batch.push({
           candidate: { ...candidate, kind },
           kind,
@@ -860,35 +858,6 @@ export async function discoverCandidates(
           interest_text: interest.text,
         });
       }
-    };
-
-    // The gate itself, per source. Spotify is checked on title and show name —
-    // which is what a Spotify episode candidate carries, creator being the show.
-    const keep = (
-      candidate: SourceCandidate,
-      type: "article" | "video" | "podcast" | "ainews"
-    ): boolean => {
-      // Podcasts and arXiv are held to the strict standard: the match must be in
-      // the TITLE. Both are loose sources — Apple matches any word in an episode
-      // blurb, and arXiv's subject filter (cs.AI/cs.LG/cs.CL/cs.SE) narrows the
-      // field but not the topic, so "PhysStream: Streaming Physics-Grounded Video
-      // Generation" and "Vanilla Scotogenic Model at the future Muon Collider"
-      // both arrived for an interest about owning an AI initiative. `titleOnly` is
-      // passed explicitly rather than inferred from candidate.kind, because at gate
-      // time the raw candidate has not been labelled with its kind yet.
-      // Shortform social video never counts as an article: escaping that is the
-      // entire point of this feed.
-      if (type === "article" && isShortformSocial(candidate.url)) return false;
-
-      const titleOnly = type === "podcast" || candidate.platform === "arxiv";
-      // Podcasts are held to the strictest standard of all: the TITLE must contain
-      // a word from the interest LABEL, not merely two words from a search phrase.
-      // The episode that defeated the looser rule matched "how to read more books
-      // every week" on the words "every" and "week".
-      const requireLabel = type === "podcast";
-      return queries.some((q) =>
-        isRelevant(candidate, q, interest.text, titleOnly, requireLabel)
-      );
     };
 
     const youtubeGroups: { query: string; items: SourceCandidate[] }[] = [];
@@ -1118,7 +1087,23 @@ export interface RankedItem {
   item: FeedItem;
   score: number;
   reason: string;
+  /** The active goal the item was attributed to. Non-null for anything surfaced. */
+  goal: string;
+  /** The id of that goal, written to feed_items.matched_goal_id. */
+  goalId: string | null;
+  /**
+   * Kept so the existing UI chip keeps working. P5's rubric is goals, not
+   * growth/fun, so this is now derived from whether the item serves a goal.
+   */
   bucket: "growth" | "fun";
+}
+
+/** One of the user's active goals, with the milestones still open under it. */
+export interface RankGoal {
+  id: string;
+  title: string;
+  description: string | null;
+  openMilestones: string[];
 }
 
 export interface Shortlist {
@@ -1146,27 +1131,25 @@ export interface Shortlist {
   droppedLowScore: number;
   droppedDiversity: number;
   droppedFeedback: number;
-  /** Cheap pre-model drops: listicles/top-N and shortform social. */
+  /** Cheap pre-model drops: shortform social only, now that the listicle regex is gone. */
   droppedMechanical: number;
 }
 
-// How many candidates the model is shown. Bounded because one call carries the
-// whole list, and 60 is already more than a day's rotation can act on.
-const CANDIDATE_LIMIT = 60;
+// How many candidates the ranker considers in one run. Bounded because one call
+// carries the whole list, and the pool is no longer trimmed by a relevance gate
+// at ingest (P5): the cap lives HERE, on the model call, rather than discarding
+// candidates on the way in. Env-tunable so a broader sweep needs no code change.
+const DEFAULT_RANK_LIMIT = 40;
 
-// Anything below this is not worth an item: the rubric's "punish to 0" cases
-// land here, and so does merely mediocre content.
-const MIN_SCORE = 55;
+function rankLimit(): number {
+  return envInt("FEED_RANK_LIMIT", DEFAULT_RANK_LIMIT);
+}
 
-// Engagement bait and listicles, dropped mechanically BEFORE the model is
-// asked, because they are cheap to recognise and cost nothing to reject. A
-// top-N list is never what this feed is for, however well it ranks.
-//
-// The apostrophe class matters: sources spell "won't" with a straight quote and
-// with a curly one, and a bait headline that slips through on punctuation alone
-// would be exactly the item this pattern exists to stop.
-const LISTICLE_PATTERN =
-  /top\s*\d+|\d+\s+(best|ways|things)|\btier list\b|you won[’']?t believe|ultimate guide|ranked from worst/i;
+// The score is an integer 1-5 against the user's GOALS (P5), not a 0-100 against
+// interest areas. 3 is the floor: below it the item does not move him toward a
+// goal. A five-point scale with a meaningful floor, not a percentage.
+const MIN_SCORE = 3;
+const MAX_SCORE = 5;
 
 // Per-interest allowances. The first pass takes at most 2 items of any one
 // interest; the fallbacks relax that visibly (to 3, then 4) so a thin day can
@@ -1221,23 +1204,51 @@ export function itemMinutes(item: FeedItem): number {
   return ESTIMATED_MINUTES[item.kind] ?? 6;
 }
 
-// The rubric, verbatim in spirit from the plan. It is deliberately blunt about
-// the two things the live output got wrong: a reason that names the user's own
-// thing, and a non-English item scoring zero however good it is.
-const RANK_SYSTEM = `You rank a specific person's candidate reading, watching and listening for one day. You are honest and severe: a high score is a promise, and a vague reason is worse than no item at all.
+// The rubric, verbatim in spirit from the plan. This is a GOAL feed, not a news
+// feed: the question for every candidate is "which of this person's active goals
+// does it move him toward?", and the answer is an integer 1-5 with a reason that
+// names the goal. The calibration below is the user's own, written in because a
+// keyword list cannot tell "basics" he is past from "basics" he needs.
+const RANK_SYSTEM = `You rank a specific person's candidate reading, watching and listening for one day. This is a GOAL feed, not a news feed: for every candidate the question is "which of this person's active goals does it move him toward?". You are honest and severe. He wants to get SMARTER, not to be entertained. A high score is a promise, and a vague reason is worse than no item at all.
 
 Return ONLY JSON:
-{"ranked":[{"index":3,"score":84,"reason":"because you are preparing the salary conversation","bucket":"growth"}]}
+{"ranked":[{"index":3,"score":4,"goal":"Move toward a leadership role","reason":"design patterns for agents, past the basics he already has"}]}
 
-Score every candidate 0-100.
-REWARD: specificity (a named technique, a number, a concrete experience), first-hand experience, depth, something the user could act on today, and a clear tie to one of the stated interest areas.
-PUNISH TO 0: engagement bait; outrage or "shock" framing; listicles, top-N lists and tier lists; reaction or commentary with no substance; content-free hype; recap or news-dump items; and anything in a language the user does not read. The user reads GERMAN and ENGLISH ONLY — a French or Spanish item is a 0, however good it is.
+Score every candidate with an INTEGER 1-5:
+5 = directly and substantially advances one of the goals below, at his level.
+4 = clearly advances a goal, useful and non-obvious.
+3 = relevant to a goal; worth surfacing.
+2 = only weakly related, or below his level, or content that does not make him smarter.
+1 = moves him toward none of his goals, or is gear/product/marketing.
 
-"reason": AT MOST 12 WORDS, and it MUST name the user's own thing — "because you are preparing the salary conversation", NOT "great career content". A generic reason is worse than no item, because it teaches the user to stop reading them.
-"bucket": "growth" when the item serves a stated goal, "fun" otherwise. Never inflate.
-Omit any candidate you cannot justify. An omitted candidate, or one with an empty reason, is dropped — it is never surfaced behind a vague label.
-"score": integer 0-100. Below 55 the item is dropped.
+CALIBRATION (his own, follow it literally):
+- He is ADVANCED at AI and vibecoding. Basics he already has score LOW: "Basics of Vibe Coding Explained" is a 2. Content at HIS level scores HIGH: limits, design patterns, and agents.
+- Product, gear, buy and top-N content scores LOW regardless of topic, because it does not make him smarter. "Best 6 Tennisballmaschinen" is a 1.
+- Tennis TECHNIQUE and TRAINING are relevant (Play tennis regularly); equipment lists and ball-machine reviews are not.
+- Relevant: leadership and visibility; health and cooking WITHOUT product lists; reading about leadership, relationships and psyche.
+- Score 2 or lower when an item moves him toward NONE of his goals, however well made it is.
+- He reads GERMAN and ENGLISH ONLY. A French or Spanish item is a 1, however good it is.
+
+"goal": the EXACT title of ONE of the active goals listed below that the item serves, copied verbatim. It is required — a candidate you cannot attribute to a goal is not for him.
+"reason": AT MOST 12 WORDS, ONE sentence, and it MUST name the goal (or the milestone) it serves — "design patterns for agents, past the basics he already has", NOT "great content". A generic reason is worse than no item, because it teaches him to stop reading them.
+Omit any candidate you cannot justify. An omitted candidate, a candidate with no goal, or one with an empty reason is dropped — it is never surfaced behind a vague label.
 Every index you return MUST be an index from the numbered candidate list, and an index must appear at most once.`;
+
+// The goals and their OPEN milestones, as the model reads them. This IS the
+// rubric: the interests are only discovery sources now, so the goals are what a
+// reason has to tie back to and what matched_goal_id must point at.
+function goalsBlock(goals: RankGoal[]): string {
+  if (!goals.length) return "## Active goals\n(none recorded)";
+  const lines = goals.map((g) => {
+    const desc = (g.description ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+    const head = `- ${g.title}${desc ? ` — ${desc}` : ""}`;
+    const steps = g.openMilestones.length
+      ? `\n    open steps: ${g.openMilestones.join("; ")}`
+      : "";
+    return head + steps;
+  });
+  return `## Active goals (the rubric — attribute every candidate to one of these)\n${lines.join("\n")}`;
+}
 
 // The candidate list as the model reads it: numbered so the response can refer
 // to it by index, with the interest it was found for (which is the thing a
@@ -1296,11 +1307,11 @@ interface RawRanking {
   index: number;
   score: number;
   reason: string;
-  bucket: "growth" | "fun";
+  goal: string;
 }
 
 function parseRanking(raw: string): RawRanking[] {
-  let parsed: { ranked?: { index?: unknown; score?: unknown; reason?: unknown; bucket?: unknown }[] };
+  let parsed: { ranked?: { index?: unknown; score?: unknown; reason?: unknown; goal?: unknown }[] };
   try {
     parsed = JSON.parse(raw);
   } catch {
@@ -1321,13 +1332,15 @@ function parseRanking(raw: string): RawRanking[] {
       .replace(/\s+/g, " ")
       .trim()
       .replace(/^because\s+/i, "");
-    const bucket = r.bucket === "fun" ? "fun" : "growth";
+    const goal = String(r.goal ?? "").replace(/\s+/g, " ").trim();
     seen.add(index);
     out.push({
       index,
-      score: Math.max(0, Math.min(100, Math.round(n))),
+      // An integer 1-5: rounded and clamped, so a model that returns 0 or 120
+      // cannot leak a foreign scale into the table.
+      score: Math.max(1, Math.min(MAX_SCORE, Math.round(n))),
       reason,
-      bucket,
+      goal,
     });
   }
   return out;
@@ -1371,6 +1384,178 @@ function selectDiverse(
   return { chosen, dropped };
 }
 
+// A candidate the model scored. `score` is the integer 1-5 and `goal`/`goalId`
+// are the active goal it was attributed to (goalId null when the model named no
+// goal, or named one that is not the user's). P5's whole rubric lives here.
+export interface ScoredCandidate {
+  item: FeedItem;
+  score: number;
+  reason: string;
+  goal: string;
+  goalId: string | null;
+}
+
+export interface ScoreResult {
+  /** Every candidate the model returned with a valid integer score and a reason. */
+  scored: ScoredCandidate[];
+  /** How many candidates were offered to the model (after the shortform drop). */
+  considered: number;
+  droppedBlankReason: number;
+  droppedOmitted: number;
+  /** Returned with a score and reason but attributed to no active goal. */
+  droppedNoGoal: number;
+  droppedLowScore: number;
+}
+
+export interface ScoreOptions {
+  /** id -> interest label, so the candidate block can say what it was found for. */
+  interestText?: Map<string, string>;
+  /** The user's feedback history, so the model can avoid repeat recommendations. */
+  history?: string;
+  /** Overridable for a test that wants the exact same path without a DB. */
+  goals?: RankGoal[];
+  /** Overridable for a test that wants to score arbitrary candidates. */
+  candidates?: FeedItem[];
+}
+
+// Score candidates against the user's ACTIVE GOALS with ONE model call. This is
+// the whole judgement of the feed, factored out so buildShortlist and the rank
+// test push candidates through the IDENTICAL code path rather than each having
+// its own copy. It does NOT apply the MIN_SCORE threshold or the cap: it returns
+// every candidate the model gave an integer score and a reason to, so the caller
+// decides what "surfaced" means. A failed call yields an empty result, never a
+// throw.
+export async function scoreCandidates(
+  candidates: FeedItem[],
+  goals: RankGoal[],
+  opts: ScoreOptions = {}
+): Promise<ScoreResult> {
+  const empty: ScoreResult = {
+    scored: [],
+    considered: candidates.length,
+    droppedBlankReason: 0,
+    droppedOmitted: 0,
+    droppedNoGoal: 0,
+    droppedLowScore: 0,
+  };
+  if (!candidates.length) return empty;
+
+  const interestText = opts.interestText ?? new Map<string, string>();
+  const history = opts.history ?? "";
+
+  // Numbered so the response can refer to a candidate by index. The index is the
+  // ONLY link back, so it is rebuilt here rather than trusted from the model.
+  const byIndex = new Map<number, FeedItem>();
+  candidates.forEach((item, index) => byIndex.set(index, item));
+
+  let ranked: RawRanking[] = [];
+  try {
+    const res = await llm().chat.completions.create({
+      model: MODEL,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: RANK_SYSTEM },
+        {
+          role: "user",
+          content:
+            `${goalsBlock(goals)}\n\n` +
+            `${candidateBlock(candidates, interestText)}\n` +
+            `${history ? `\n${history}\n` : ""}\n` +
+            `Rank the candidates now (JSON).`,
+        },
+      ],
+    });
+    ranked = parseRanking((res.choices[0].message.content ?? "").trim());
+  } catch {
+    // A failed call yields nothing scored, never a thrown error.
+    ranked = [];
+  }
+
+  // The goal title the model named, mapped to the user's own id. Matching is
+  // case-insensitive on the trimmed title so a small spelling difference does
+  // not lose the attribution.
+  const goalByTitle = new Map<string, RankGoal>();
+  for (const g of goals) goalByTitle.set(g.title.trim().toLowerCase(), g);
+
+  let droppedBlankReason = 0;
+  let droppedNoGoal = 0;
+  const scored: ScoredCandidate[] = [];
+  for (const r of ranked) {
+    const item = byIndex.get(r.index);
+    if (!item) continue;
+    // An item returned with a blank reason is dropped — never surfaced behind a
+    // vague label.
+    if (!r.reason || !r.reason.trim()) {
+      droppedBlankReason++;
+      continue;
+    }
+    const match = r.goal ? goalByTitle.get(r.goal.trim().toLowerCase()) : undefined;
+    if (!match) droppedNoGoal++;
+    scored.push({
+      item,
+      score: r.score,
+      reason: r.reason,
+      goal: match ? match.title : r.goal,
+      goalId: match ? match.id : null,
+    });
+  }
+
+  // Candidates the model left out entirely, counted SEPARATELY from a blank
+  // reason because the two mean different things: a blank reason is the model
+  // declining to justify an item, an omission is the model ignoring an explicit
+  // instruction. Reporting them as a single number is what hid a real run
+  // dropping 19 candidates and producing a one-item feed without saying which
+  // had happened.
+  const returned = new Set(ranked.map((r) => r.index));
+  let droppedOmitted = 0;
+  for (const [index] of byIndex) {
+    if (!returned.has(index)) droppedOmitted++;
+  }
+  if (byIndex.size > 0 && droppedOmitted > byIndex.size / 2) {
+    console.log(
+      `  [feed] the ranking omitted ${droppedOmitted} of ${byIndex.size} candidates — the ` +
+        `prompt requires one entry per candidate, so this is the instruction being ignored, ` +
+        `not a filter rejecting them.`
+    );
+  }
+
+  return {
+    scored,
+    considered: candidates.length,
+    droppedBlankReason,
+    droppedOmitted,
+    droppedNoGoal,
+    droppedLowScore: 0,
+  };
+}
+
+// Load the active goals with their OPEN milestones — the rubric the model scores
+// against. Best-effort: a failed read yields an empty rubric (the model then
+// cannot attribute anything, which shows up as an empty shortlist rather than a
+// wrong one).
+export async function loadRankGoals(): Promise<RankGoal[]> {
+  try {
+    const goals = (await getGoals("active")).filter((g) => g.status === "active");
+    const out: RankGoal[] = goals.map((g) => ({
+      id: g.id,
+      title: g.title,
+      description: g.description,
+      openMilestones: [],
+    }));
+    if (out.length) {
+      const byId = new Map(out.map((g) => [g.id, g]));
+      const milestones = await getMilestones();
+      for (const m of milestones) {
+        if (m.done) continue;
+        byId.get(m.goal_id)?.openMilestones.push(m.title);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 // The day's shortlist: load, drop cheaply, ask the model once, select with the
 // diversity rule and the time budget, then stamp what was chosen.
 //
@@ -1412,6 +1597,9 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
 
   // 1. Candidates: new and validated, newest first. saved/hidden/done are
   // excluded by the status filter, which is the same "already answered" set.
+  // FEED_RANK_LIMIT is the only bound on how many are considered — the ingest no
+  // longer trims the pool by relevance (P5), so the cap lives here, on the one
+  // model call, where it actually bounds cost.
   let candidates: FeedItem[] = [];
   try {
     const { data, error } = await db
@@ -1420,7 +1608,7 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
       .eq("status", "new")
       .eq("validated", true)
       .order("created_at", { ascending: false })
-      .limit(CANDIDATE_LIMIT);
+      .limit(rankLimit());
     if (error) throw new Error(error.message);
     candidates = (data ?? []) as FeedItem[];
   } catch {
@@ -1466,11 +1654,15 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
     kept.push(item);
   }
 
-  // 2. The two cheap mechanical drops, before any tokens are spent.
+  // 2. The one cheap drop left: shortform social. A TikTok URL is a FORMAT
+  // decision, not a meaning judgement, so it never reaches the model. The
+  // listicle regex is gone (P5) — "top-N content scores low" is now a rubric
+  // line, because a keyword list cannot tell "basics" he is past from "basics"
+  // he needs.
   let droppedMechanical = 0;
   const mechanical: FeedItem[] = [];
   for (const item of kept) {
-    if (LISTICLE_PATTERN.test(item.title) || isShortformSocial(item.url)) {
+    if (isShortformSocial(item.url)) {
       droppedMechanical++;
       continue;
     }
@@ -1497,77 +1689,48 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
   }
 
   // 3. ONE model call, JSON mode, over the numbered candidates plus the rubric.
-  const history = await feedbackBlock();
-  let ranked: RawRanking[] = [];
-  try {
-    const res = await llm().chat.completions.create({
-      model: MODEL,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: RANK_SYSTEM },
-        {
-          role: "user",
-          content:
-            `${candidateBlock(mechanical, interestText)}\n` +
-            `${history ? `\n${history}\n` : ""}\n` +
-            `Rank the candidates now (JSON).`,
-        },
-      ],
-    });
-    ranked = parseRanking((res.choices[0].message.content ?? "").trim());
-  } catch {
-    // A failed call yields an empty shortlist, never a thrown error.
-    ranked = [];
-  }
+  //    The rubric is the user's ACTIVE GOALS (with their open milestones), not
+  //    the interest areas: the interests only decided where to look.
+  const [history, goals] = await Promise.all([feedbackBlock(), loadRankGoals()]);
+  const result = await scoreCandidates(mechanical, goals, { interestText, history });
 
-  // The model's own numbering is the only link back to a candidate, so an index
-  // it never saw is ignored rather than trusted.
-  const byIndex = new Map<number, FeedItem>();
-  mechanical.forEach((item, index) => byIndex.set(index, item));
+  // Every caller-facing number comes straight from scoreCandidates, so the test
+  // that drives it directly reports the same thing the feed does.
+  const droppedBlankReason = result.droppedBlankReason;
+  const droppedOmitted = result.droppedOmitted;
+  const droppedNoReason = droppedBlankReason + droppedOmitted;
 
-  let droppedBlankReason = 0;
+  // 4. THE THRESHOLD — the first and most important cut, secondary to nothing.
+  //    Anything below MIN_SCORE (or attributed to no goal) is parked: no
+  //    surfaced_day, so it ages out, and no reason.
   let droppedLowScore = 0;
   const scored: RankedItem[] = [];
-  for (const r of ranked) {
-    const item = byIndex.get(r.index);
-    if (!item) continue;
-    // An item returned with a blank reason is dropped — never surfaced behind a
-    // vague label.
-    if (!r.reason || !r.reason.trim()) {
-      droppedBlankReason++;
-      continue;
-    }
-    if (r.score < MIN_SCORE) {
+  for (const s of result.scored) {
+    if (s.score < MIN_SCORE) {
       droppedLowScore++;
       continue;
     }
-    scored.push({ item, score: r.score, reason: r.reason, bucket: r.bucket });
+    // An item with no goal is not surfaced: "which goal does this serve?" is the
+    // whole question, and an answer of "none" is a no.
+    if (!s.goalId) continue;
+    scored.push({
+      item: s.item,
+      score: s.score,
+      reason: s.reason,
+      goal: s.goal,
+      goalId: s.goalId,
+      // P5's rubric is goals, not growth/fun. Keep the field honest: an item that
+      // cleared the bar serves a goal, which is what "growth" always meant.
+      bucket: "growth",
+    });
   }
 
-  // Candidates the model left out entirely, counted SEPARATELY from a blank
-  // reason because the two mean different things: a blank reason is the model
-  // declining to justify an item, an omission is the model ignoring an explicit
-  // instruction. Reporting them as a single number is what hid a real run dropping
-  // 19 candidates and producing a one-item feed without saying which had happened.
-  const returned = new Set(ranked.map((r) => r.index));
-  let droppedOmitted = 0;
-  for (const [index] of byIndex) {
-    if (!returned.has(index)) droppedOmitted++;
-  }
-  const droppedNoReason = droppedBlankReason + droppedOmitted;
-  if (byIndex.size > 0 && droppedOmitted > byIndex.size / 2) {
-    console.log(
-      `  [feed] the ranking omitted ${droppedOmitted} of ${byIndex.size} candidates — the ` +
-        `prompt requires one entry per candidate, so this is the instruction being ignored, ` +
-        `not a filter rejecting them.`
-    );
-  }
-
-  // Best first, but within a score band prefer the shorter item: bands are 8
-  // points wide, so a 79 and an 84 compete on length while a 40 can never jump an
-  // 84. This is how the day lands near its time budget WITHOUT the budget ever
-  // blocking an item — length is absorbed into ordering instead.
-  const SCORE_BAND = 8;
+  // Best first, but within a score band prefer the shorter item. With a 1-5
+  // scale the band is a single point, so a 5 beats a 4 whatever its length while
+  // two 5s compete on the shorter one. This is how the day lands near its time
+  // budget WITHOUT the budget ever blocking an item — length is absorbed into
+  // ordering instead.
+  const SCORE_BAND = 1;
   scored.sort(
     (a, b) =>
       Math.floor(b.score / SCORE_BAND) - Math.floor(a.score / SCORE_BAND) ||
@@ -1577,7 +1740,9 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
   // 4. Diversity selection. The first pass holds every interest to 2 items; only
   // when the list would otherwise be short is the limit relaxed, visibly, to 3
   // and then 4 — and it stops there.
-  const cap = Math.min(dailyCount, mechanical.length);
+  // Secondary to the threshold: the cap is how many of the items that CLEARED
+  // the bar may be shown, never a way to pad a short day.
+  const cap = Math.min(dailyCount, scored.length);
   let chosen: RankedItem[] = [];
   let droppedDiversity = 0;
   const first = selectDiverse(scored, INTEREST_LIMIT, cap);
@@ -1621,6 +1786,7 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
           score: r.score,
           reason: r.reason,
           bucket: r.bucket,
+          matched_goal_id: r.goalId,
           updated_at: stamp,
         })
         .eq("id", r.item.id);
