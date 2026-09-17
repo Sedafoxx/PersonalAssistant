@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
-import { curateTopic, getActiveFacts, getTopics, type MemoryTopic } from "./memory";
+import { curateTopic, getActiveFacts, type MemoryTopic } from "./memory";
 import { listLoops, staleLoops } from "./loops";
 import { listCommitments } from "./commitments";
 import { getReflection } from "./reflection";
