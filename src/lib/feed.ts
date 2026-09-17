@@ -105,6 +105,11 @@ export interface DiscoveryStats {
   // validation failure, a live link that does not fit is a relevance failure.
   rejectedValidation: number;
   rejectedRelevance: number;
+  // Per source, how many candidates it returned and whether it errored or came
+  // back empty — so a dead source is a fact in the stats, not an absence. Filled
+  // in by discoverCandidates; optional so a caller can build a zeroed stats
+  // object before a run has happened.
+  bySource?: Record<string, SourceOutcome>;
 }
 
 // How many candidates each source contributed and how many of them the
@@ -123,12 +128,29 @@ export interface DiscoveredItem {
   interest_text: string;
 }
 
+// What ONE source did on ONE interest: how many candidates it returned, and —
+// the point of this type — whether it ERRORED or came back EMPTY. Without it a
+// source that dies contributes nothing and leaves no trace, so an outage and a
+// genuinely thin topic look identical in the report.
+export interface SourceOutcome {
+  candidates: number;
+  errored: boolean;
+  empty: boolean;
+  /** The reason it errored, when one was reported (e.g. "HTTP 403"). */
+  reason: string | null;
+}
+
 export interface DiscoveryResult {
   candidates: DiscoveredItem[];
   stats: DiscoveryStats;
   // Per interest text, then per source type (`articles`, `youtube`,
   // `podcasts`, `ai-news`).
   bySource: Record<string, Record<string, SourceTally>>;
+  // Per SOURCE (not per interest), the outcome of this run's calls, so a failing
+  // or empty source is a named fact in the returned stats rather than silence.
+  sourceOutcomes: Record<string, SourceOutcome>;
+  // One human-readable line per source that failed or returned nothing.
+  sourceNotes: string[];
 }
 
 export interface DiscoveryOptions {
@@ -807,10 +829,38 @@ export async function discoverCandidates(
   };
   const candidates: DiscoveredItem[] = [];
   const bySource: Record<string, Record<string, SourceTally>> = {};
+  // Per-source outcomes and the one-line reports they produce. A source that
+  // fails or returns nothing is a NAMED fact here, so an outage cannot hide
+  // behind an empty feed.
+  const sourceOutcomes: Record<string, SourceOutcome> = {};
+  const sourceNotes: string[] = [];
+  const noteOutcome = (name: string, count: number, reason: string | null) => {
+    const prior = sourceOutcomes[name];
+    sourceOutcomes[name] = {
+      candidates: (prior?.candidates ?? 0) + count,
+      errored: !!reason || !!prior?.errored,
+      empty: count === 0,
+      reason: reason ?? prior?.reason ?? null,
+    };
+    // ONE line per source that contributed nothing this run, naming the source,
+    // the reason when there is one, and the fact that it contributed nothing.
+    // A source that returns results is silent — only the failures are loud.
+    if (count === 0) {
+      sourceNotes.push(
+        `${name}: 0 results${reason ? ` (${reason})` : ""} — contributed nothing`
+      );
+    }
+  };
+  const empty = (): DiscoveryResult => {
+    // The per-source outcomes ride along IN the stats too, so a caller that only
+    // keeps `stats` still learns which source failed or came back empty.
+    stats.bySource = sourceOutcomes;
+    return { candidates, stats, bySource, sourceOutcomes, sourceNotes };
+  };
 
   // Only things to seek out are searched.
   const pool = interests.filter((i) => i.kind === "topic" && i.active);
-  if (!pool.length) return { candidates, stats, bySource };
+  if (!pool.length) return empty();
 
   const weightById = new Map(pool.map((i) => [i.id, Number(i.weight) || 0]));
 
@@ -865,9 +915,31 @@ export async function discoverCandidates(
     const newsGroups: { query: string; items: SourceCandidate[] }[] = [];
     const podcastGroups: { query: string; items: SourceCandidate[] }[] = [];
 
+    // Each source call runs through this: a throw becomes a recorded ERROR with
+    // its message as the reason, and an empty return is recorded as EMPTY. Both
+    // are turned into one report line by noteOutcome, so a dead source is
+    // visible instead of silently contributing nothing.
+    const callSource = async (
+      name: string,
+      run: () => Promise<SourceCandidate[]>
+    ): Promise<SourceCandidate[]> => {
+      try {
+        const list = await run();
+        noteOutcome(name, list.length, null);
+        return list;
+      } catch (err) {
+        const reason =
+          err instanceof Error && err.message ? err.message : "error";
+        noteOutcome(name, 0, reason);
+        return [];
+      }
+    };
+
     // Podcasts are keyless, so they always run.
     for (const query of queries) {
-      const { candidates: found } = await searchPodcasts(query);
+      const found = await callSource("podcasts", async () =>
+        (await searchPodcasts(query)).candidates
+      );
       podcastGroups.push({ query, items: found });
     }
     push("podcast", collect(podcastGroups, perSourceLimit));
@@ -876,11 +948,17 @@ export async function discoverCandidates(
     for (const query of queries) {
       if (stats.tavilyCalls < tavilyBudget) {
         stats.tavilyCalls++;
-        articleGroups.push({ query, items: await searchArticles(query) });
+        articleGroups.push({
+          query,
+          items: await callSource("articles", () => searchArticles(query)),
+        });
       }
       if (stats.tavilyCalls < tavilyBudget) {
         stats.tavilyCalls++;
-        youtubeGroups.push({ query, items: await searchYouTube(query) });
+        youtubeGroups.push({
+          query,
+          items: await callSource("youtube", () => searchYouTube(query)),
+        });
       }
       if (stats.tavilyCalls >= tavilyBudget) break;
     }
@@ -891,7 +969,12 @@ export async function discoverCandidates(
     // interest with no AI/software token, so tennis and curry never ask it.
     const includeArxiv = isAiSoftwareInterest(`${interest.text} ${queries.join(" ")}`);
     for (const query of queries) {
-      newsGroups.push({ query, items: await searchAiNews(query, { includeArxiv }) });
+      newsGroups.push({
+        query,
+        items: await callSource("ai-news", () =>
+          searchAiNews(query, { includeArxiv })
+        ),
+      });
     }
     push("ainews", collect(newsGroups, perSourceLimit));
 
@@ -926,7 +1009,11 @@ export async function discoverCandidates(
     return true;
   });
 
-  return { candidates: uniqueCandidates, stats, bySource };
+  // Say out loud what each failing or empty source did. ONE line per source,
+  // logged here rather than swallowed, so a silent 0 is reported as a fact.
+  for (const note of sourceNotes) console.log(`  [feed] ${note}`);
+
+  return { ...empty(), candidates: uniqueCandidates };
 }
 
 // Persist validated candidates, deduped within the batch and against rows that
@@ -1226,6 +1313,7 @@ CALIBRATION (his own, follow it literally):
 - Product, gear, buy and top-N content scores LOW regardless of topic, because it does not make him smarter. "Best 6 Tennisballmaschinen" is a 1.
 - Tennis TECHNIQUE and TRAINING are relevant (Play tennis regularly); equipment lists and ball-machine reviews are not.
 - Relevant: leadership and visibility; health and cooking WITHOUT product lists; reading about leadership, relationships and psyche.
+- NEWS CLAUSE (AI and agent engineering). Substantive AI and agent-engineering content that actually TEACHES him something at his level advances the goal "Owning the AI Initiative at Work" and MUST score 3 or higher, with that goal named in "goal" and referenced in the reason. His level means: agent architecture and how a system is put together; design patterns for agents and LLM applications; the LIMITS of the technology and when it fails; evaluation, evals and how you know it works; tooling and the real mechanics of building; and post-mortems or case studies of how a real initiative was made to work inside a company. Score 2 the things that teach him nothing: funding rounds, model-release announcements, benchmark marketing, hype and industry gossip. Concretely — 4: "How we redesigned our agent's tool-calling to cut retries by 60%, with the eval harness we built to prove it" (agent architecture + evaluation, owned inside a real company). 2: "OpenAI raises $40B at a $300B valuation" (a funding round; it teaches him nothing about owning the initiative).
 - Score 2 or lower when an item moves him toward NONE of his goals, however well made it is.
 - He reads GERMAN and ENGLISH ONLY. A French or Spanish item is a 1, however good it is.
 
