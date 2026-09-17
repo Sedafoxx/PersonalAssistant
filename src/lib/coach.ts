@@ -6,11 +6,12 @@ import { getItems, createItem, type Item } from "./db";
 import { getReflection, getReflectionStreak, type ChecklistItem } from "./reflection";
 import { listUpcomingEvents, createEvent } from "./calendar";
 import { getDay, getDayMetrics, listLeftovers } from "./day";
-import { getMilestonesByGoal } from "./milestones";
+import { getMilestonesByGoal, type Milestone } from "./milestones";
 import { logicalDay } from "./dates";
 import { formatForContext, upsertFact, curateTopic } from "./memory";
 import { listLoops, staleLoops } from "./loops";
 import { listCommitments } from "./commitments";
+import { getBacklog, formatBacklogForContext } from "./backlog";
 
 // --- types ------------------------------------------------------------------
 
@@ -232,6 +233,22 @@ export async function buildCoachContext(): Promise<string> {
     }
   } catch {
     // no milestones section
+  }
+
+  // The backlog: what has stalled and what is waiting. This is the ammunition
+  // that lets the coach see a goal with no next step, rather than only the
+  // goals that are already moving. Best-effort like every other section, and
+  // silent when there is nothing to say (formatBacklogForContext returns "").
+  try {
+    const backlog = await getBacklog();
+    const block = formatBacklogForContext(backlog);
+    if (block) {
+      parts.push(
+        `## What has stalled and what is waiting in the backlog\n${block}`
+      );
+    }
+  } catch {
+    // no backlog section
   }
 
   if (entries.length) {
@@ -839,22 +856,43 @@ export interface PlanBlock {
   priority?: number; // 1–5, same scale as the rest of the app
 }
 
+/** A backlog item the plan deliberately pulled in, and why today suits it. */
+export interface PlanBacklogUse {
+  title: string;
+  reason: string;
+}
+
 export interface DayPlan {
   date: string; // YYYY-MM-DD
   headline: string;
   blocks: PlanBlock[];
   note: string; // coach's closing tip
   generated_at: string;
+  /**
+   * The WHY of the plan, in prose: what needs movement and the evidence for it,
+   * the ways considered and their trade-off, and the one chosen. Optional
+   * because a plan stored before P7b has none — the UI then shows nothing
+   * rather than an empty box.
+   */
+  strategy?: string;
+  /** The backlog items the plan pulled, each with the reason today suits it. */
+  backlogUsed?: PlanBacklogUse[];
 }
 
-const PLAN_SYSTEM = `You are the user's practical day-planner coach. Build a REALISTIC time-blocked plan for TODAY from their calendar, active goals, open todos, and today's mood/focus. Respect existing calendar events as fixed anchors.
+const PLAN_SYSTEM = `You are the user's practical day-planner COACH. You decide what actually needs movement today and then build a REALISTIC time-blocked plan for TODAY from their calendar, active goals, open milestones, open todos, the backlog, and today's mood/focus. Respect existing calendar events as fixed anchors.
 
-Rules:
+DECIDE BEFORE YOU SCHEDULE. Filling time slots is a clerk's job; your job is to make the next real step visible and to say why it is that one.
+- Name AT MOST TWO things that need movement, chosen by EVIDENCE in the context below: a stalled milestone (and how long it has stalled), a goal whose progress has not moved, a due date, or a promise said and not yet done. Quote the evidence instead of asserting that something needs attention.
+- Weigh TWO OR THREE genuinely different ways to move it — not three sizes of the same task. Different angles: a conversation to have, a small experiment, something to prepare, a decision to make, something to STOP doing. Note the trade-off (fast vs thorough, alone vs with someone, today vs later), then say which you chose and why, tied to the milestone it moves.
+- PULL AT MOST THREE items from the backlog that genuinely fit today, each with the reason today suits it. An empty list is honest: "nothing in the backlog fits today" is a complete answer, and inventing work to look thorough is worse than a short list.
+
+Scheduling rules:
 - Cover the useful waking hours (usually 08:00–22:00). Include meals and at least one real break and downtime in the evening.
 - Anchor around existing events (don't overlap them; leave travel/buffer around them).
-- Prefer deriving tasks from the user's active-goal MILESTONES: break an open milestone into one small, doable block, and use the exact goal title.
-- Tie most working/focus blocks to ONE of their active goals (use the exact goal title), so the day moves goals forward.
-- Keep blocks 30–120 min. Max ~10 blocks. Be humane: no back-to-back grind; if mood is low, lighter and fewer.
+- Derive tasks from the user's active-goal MILESTONES: break an open milestone into one small, doable block, and use the exact goal title.
+- Tie most working/focus blocks to ONE of their active goals (use the exact goal title), so the day moves goals forward. If a block serves no goal, say so honestly in "why" — habits, meals, rest and genuine admin are allowed to serve none.
+- Do NOT pad the day. Do not fill hours because hours exist, and do not make every block the same kind of small chore: at most one admin/errand block unless something is genuinely urgent today. A shorter honest day beats a full-looking one.
+- Keep blocks 30–120 min. AT MOST 10 blocks — count them before you return, and cut the weakest rather than exceeding it. Be humane: no back-to-back grind; if mood is low, lighter and fewer.
 - Include any urgent open todos as "task" blocks.
 - Mark each block "required": true when it genuinely needs doing today (a commitment, a deadline, something the day depends on), and false when it is a nice-to-have. Default to true when unsure.
 - Give each block a "priority" from 1 (most important) to 5 (least).
@@ -863,6 +901,8 @@ Rules:
 
 Return ONLY JSON:
 {"headline":"one-line theme for the day",
+ "strategy":"2-4 sentences of plain prose written TO the user: what needs movement and the evidence, the two or three ways you weighed and their trade-off, and the one you chose and why. Never restate the schedule here — this is the thinking, not the timetable.",
+ "backlog_used":[{"title":"exact title of a backlog item you scheduled","reason":"one clause: why today is a reasonable day for it"}],
  "blocks":[{"start":"09:00","end":"10:00","title":"...","type":"focus|task|habit|break|event|social|admin","goal":"exact goal title or null","why":"...","required":true,"priority":2}],
  "note":"one-sentence coach tip"}`;
 
@@ -872,6 +912,24 @@ function coercePriority(value: unknown, type: string): number {
   const n = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(n)) return type === "focus" ? 2 : 3;
   return Math.min(5, Math.max(1, Math.round(n)));
+}
+
+// Trim prose to a whole thought: at most `max` characters, cut at the last
+// sentence end, and failing that at a word boundary. A plain slice() on a
+// model-written paragraph lands mid-word ("... heute ist der Tag, an"), which
+// reads as a bug to the person looking at it rather than as a length limit.
+function trimProse(text: string, max: number): string {
+  const clean = text.trim();
+  if (clean.length <= max) return clean;
+  const cut = clean.slice(0, max);
+  const lastStop = Math.max(
+    cut.lastIndexOf(". "),
+    cut.lastIndexOf("! "),
+    cut.lastIndexOf("? ")
+  );
+  if (lastStop > max * 0.6) return cut.slice(0, lastStop + 1);
+  const lastSpace = cut.lastIndexOf(" ");
+  return `${(lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd()} …`;
 }
 
 // Build a realistic plan for the day and persist it on the day's morning check-in.
@@ -897,6 +955,19 @@ export async function planDay(day = localDay()): Promise<DayPlan> {
       return `- ${s}${en ? `–${en}` : ""} ${e.title}${e.location ? ` @ ${e.location}` : ""}`;
     });
 
+  // The open milestones and the backlog. The prompt asks for milestone-derived
+  // blocks and for backlog items, so the plan has to actually SEE them — before
+  // P7b it was instructed to use milestones and handed none, which is how a
+  // planner ends up scheduling generic chores. Both reads are best-effort.
+  const [milestonesByGoal, backlogBlock] = await Promise.all([
+    getMilestonesByGoal(goals.map((g) => g.id)).catch(
+      () => ({}) as Record<string, Milestone[]>
+    ),
+    getBacklog()
+      .then((b) => formatBacklogForContext(b))
+      .catch(() => ""),
+  ]);
+
   const parts: string[] = [];
   parts.push(`Today: ${day} (${new Date(day + "T00:00:00").toLocaleDateString("en-US", { weekday: "long" })}).`);
   if (events.length) parts.push(`## Fixed calendar events today\n${events.join("\n")}`);
@@ -905,8 +976,26 @@ export async function planDay(day = localDay()): Promise<DayPlan> {
     parts.push(
       `## Active goals\n${goals.map((g) => `- ${g.title} [${g.progress}${g.target ? `/${g.target}` : ""}]`).join("\n")}`
     );
+  try {
+    const msLines: string[] = [];
+    for (const g of goals) {
+      const open = (milestonesByGoal[g.id] ?? []).filter((m) => !m.done);
+      if (!open.length) continue;
+      msLines.push(...open.slice(0, 4).map((m) => `- ${g.title} :: ${m.title}`));
+    }
+    if (msLines.length)
+      parts.push(
+        `## Open milestones (break ONE into a block, keep the goal title)\n${msLines.join("\n")}`
+      );
+  } catch {
+    // no milestones section
+  }
   if (todos.length)
     parts.push(`## Open todos\n${todos.map((t) => `- ${t.title}`).join("\n")}`);
+  if (backlogBlock)
+    parts.push(
+      `## What has stalled and what is waiting in the backlog\n${backlogBlock}`
+    );
   if (checkin?.mood != null || checkin?.focus)
     parts.push(
       `## This morning\n${checkin?.mood != null ? `Mood ${checkin.mood}/5. ` : ""}${checkin?.focus ? `Focus they set: ${checkin.focus}` : ""}`.trim()
@@ -924,12 +1013,30 @@ export async function planDay(day = localDay()): Promise<DayPlan> {
 
   let headline = "Your day";
   let note = "";
+  let strategy = "";
+  let backlogUsed: PlanBacklogUse[] = [];
   let blocks: PlanBlock[] = [];
   const TYPES = ["focus", "task", "habit", "break", "event", "social", "admin"];
   try {
-    const p = JSON.parse(raw) as { headline?: string; note?: string; blocks?: Partial<PlanBlock>[] };
+    const p = JSON.parse(raw) as {
+      headline?: string;
+      note?: string;
+      strategy?: string;
+      backlog_used?: { title?: string; reason?: string }[];
+      blocks?: Partial<PlanBlock>[];
+    };
     headline = (p.headline ?? "Your day").trim();
     note = (p.note ?? "").trim();
+    // The reasoning is prose for the user; keep it whole but bounded, and end it
+    // on a sentence rather than in the middle of a word.
+    strategy = typeof p.strategy === "string" ? trimProse(p.strategy, 1400) : "";
+    backlogUsed = (Array.isArray(p.backlog_used) ? p.backlog_used : [])
+      .map((b) => ({
+        title: String(b?.title ?? "").trim().slice(0, 160),
+        reason: trimProse(String(b?.reason ?? ""), 180),
+      }))
+      .filter((b) => b.title.length > 0)
+      .slice(0, 3);
     const hhmm = /^\d{2}:\d{2}$/;
     blocks = (p.blocks ?? [])
       .filter((b) => hhmm.test(String(b.start)) && hhmm.test(String(b.end)))
@@ -951,7 +1058,15 @@ export async function planDay(day = localDay()): Promise<DayPlan> {
     headline = raw.slice(0, 120) || "Your day";
   }
 
-  const plan: DayPlan = { date: day, headline, blocks, note, generated_at: new Date().toISOString() };
+  const plan: DayPlan = {
+    date: day,
+    headline,
+    blocks,
+    note,
+    strategy,
+    backlogUsed,
+    generated_at: new Date().toISOString(),
+  };
 
   // Persist on the day's morning check-in (upsert by kind,day).
   try {

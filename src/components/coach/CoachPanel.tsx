@@ -625,6 +625,14 @@ export function CoachPanel() {
               <div>
                 <p className="text-sm text-gray-200 font-medium">{plan.headline}</p>
               </div>
+              {/* The reasoning, above the timetable: what needs movement, the
+                  options weighed, the one chosen. Shown before the blocks so the
+                  day reads as an argument, not a rota. */}
+              {plan.strategy && (
+                <p className="text-xs text-gray-400 leading-relaxed border-l-2 border-amber-600/40 pl-3">
+                  {plan.strategy}
+                </p>
+              )}
               <div className="space-y-1">
                 {plan.blocks.map((b, i) => {
                   const isFixed = b.type === "break" || b.type === "event";
@@ -663,6 +671,19 @@ export function CoachPanel() {
                   );
                 })}
               </div>
+              {plan.backlogUsed && plan.backlogUsed.length > 0 && (
+                <div className="pt-2 border-t border-white/5 space-y-1">
+                  <p className="text-[10px] uppercase tracking-wide text-gray-600">
+                    Pulled from your backlog
+                  </p>
+                  {plan.backlogUsed.map((b, i) => (
+                    <p key={i} className="text-[11px] text-gray-500 leading-relaxed">
+                      <span className="text-gray-300">{b.title}</span>
+                      {b.reason ? ` — ${b.reason}` : ""}
+                    </p>
+                  ))}
+                </div>
+              )}
               {plan.note && <p className="text-xs text-gray-500">{plan.note}</p>}
               <div className="flex gap-2 pt-1">
                 <button

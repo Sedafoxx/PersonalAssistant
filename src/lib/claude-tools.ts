@@ -74,6 +74,7 @@ import {
   type LoopState,
   type WaitingOn,
 } from "./loops";
+import { getBacklog, formatBacklogForContext, type Backlog } from "./backlog";
 
 // Commitments ledger + open loops tools (P6a). Declared separately and spread
 // into TOOL_DEFINITIONS so the additions stay grouped and reviewable.
@@ -210,6 +211,25 @@ const COMMITMENT_LOOP_TOOLS: OpenAI.ChatCompletionTool[] = [
             type: "string",
             enum: ["open", "waiting", "done"],
             description: "Filter by state.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_backlog",
+      description:
+        "Show what has stalled and what is waiting: milestones with no activity for two weeks, active todos that were never put on a day, and ideas captured but never turned into a step. Use this to dig mid-conversation without the whole backlog being in every prompt.",
+      parameters: {
+        type: "object",
+        properties: {
+          group: {
+            type: "string",
+            enum: ["stalled", "unscheduled", "ideas"],
+            description:
+              "Optional. Omit for the whole backlog.",
           },
         },
       },
@@ -1668,6 +1688,27 @@ export async function executeTool(
           (l.due_date ? " (due " + l.due_date + ")" : "")
       );
       return "Open loops:\n" + lines.join("\n");
+    }
+
+    case "list_backlog": {
+      const group = input.group as "stalled" | "unscheduled" | "ideas" | undefined;
+      const backlog = await getBacklog();
+      // Reuse the SAME formatter as the coach context rather than reimplementing
+      // it, so the tool and the context can never drift apart. A group filter
+      // simply empties the groups that were not asked for.
+      const filtered: Backlog = {
+        stalled: group && group !== "stalled" ? [] : backlog.stalled,
+        unscheduled: group && group !== "unscheduled" ? [] : backlog.unscheduled,
+        ideas: group && group !== "ideas" ? [] : backlog.ideas,
+        empty: backlog.empty,
+      };
+      const block = formatBacklogForContext(filtered);
+      if (!block) {
+        return group
+          ? "Nothing in the backlog under " + group + "."
+          : "The backlog is empty - nothing has stalled and nothing is waiting.";
+      }
+      return block;
     }
 
     default:
