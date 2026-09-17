@@ -134,15 +134,63 @@ async function cleanup(): Promise<void> {
       // best-effort
     }
   }
-  // Review rows. The review writes notes=null, so they are removed by the ids
-  // this run captured rather than by any marker column.
-  for (const id of createdReviewIds) {
+  // Review rows. There is no marker COLUMN — but the plants leave a marker in the
+  // row's CONTENT, because the observations quote the planted topics and facts,
+  // whose text carries "reviewtest" and this run's id. So: remove the rows this
+  // run captured by id, then sweep the recent history for any row still quoting
+  // the marker.
+  //
+  // That sweep is the whole point. A row written by a run that crashed before its
+  // id was captured used to survive — and since the morning brief reads the latest
+  // review, it then showed the USER a fabricated observation about where he lives.
+  // A genuine row never contains the marker, so the sweep cannot touch real
+  // history.
+  const reviewIds = new Set(createdReviewIds);
+  try {
+    const { data } = await db
+      .from("memory_reviews")
+      .select("id,observations,notes")
+      .order("ran_at", { ascending: false })
+      .limit(50);
+    for (const row of (data ?? []) as {
+      id: string;
+      observations: unknown;
+      notes: string | null;
+    }[]) {
+      if (rowMentionsMarker(row)) reviewIds.add(row.id);
+    }
+  } catch {
+    // best-effort
+  }
+  for (const id of reviewIds) {
     try {
       await db.from("memory_reviews").delete().eq("id", id);
     } catch {
       // best-effort
     }
   }
+}
+
+/** True when a review row quotes this test's planted marker. */
+function rowMentionsMarker(row: { observations: unknown; notes: string | null }): boolean {
+  const text = `${JSON.stringify(row.observations ?? [])} ${row.notes ?? ""}`.toLowerCase();
+  return text.includes("reviewtest") || text.includes(unique.toLowerCase());
+}
+
+/**
+ * How many recent review rows still quote the marker. Used as the FINAL assertion:
+ * nothing the test planted may survive in the history the morning brief reads.
+ */
+async function plantedReviewRowsLeft(): Promise<number> {
+  const { data, error } = await db
+    .from("memory_reviews")
+    .select("id,observations,notes")
+    .order("ran_at", { ascending: false })
+    .limit(50);
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as { observations: unknown; notes: string | null }[]).filter(
+    (row) => rowMentionsMarker(row)
+  ).length;
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -768,6 +816,24 @@ async function main(): Promise<void> {
       console.log("\nCleanup: removed created facts, topics and review rows.");
     } catch (err) {
       console.log(`\nCleanup warning: ${errText(err)}`);
+    }
+  }
+
+  // Asserted AFTER cleanup, on purpose: this is the debt that once reached the
+  // user's morning brief, so it is checked on every run rather than assumed.
+  if (tablesOk) {
+    try {
+      const leftover = await plantedReviewRowsLeft();
+      check(
+        "behavioural",
+        "cleanup leaves no review row quoting the planted marker",
+        leftover === 0,
+        leftover === 0
+          ? "no row mentions the marker"
+          : `${leftover} row(s) still quote the marker and would show in the brief`
+      );
+    } catch (err) {
+      check("behavioural", "cleanup leaves no marked review row", false, errText(err));
     }
   }
 
