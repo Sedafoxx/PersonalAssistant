@@ -9,6 +9,8 @@ import { getDay, getDayMetrics, listLeftovers } from "./day";
 import { getMilestonesByGoal } from "./milestones";
 import { logicalDay } from "./dates";
 import { formatForContext, upsertFact, curateTopic } from "./memory";
+import { listLoops, staleLoops } from "./loops";
+import { listCommitments } from "./commitments";
 
 // --- types ------------------------------------------------------------------
 
@@ -279,6 +281,49 @@ export async function buildCoachContext(): Promise<string> {
     if (living) parts.push(living);
   } catch {
     // no living-memory section
+  }
+
+  // Loops and promises, as facts rather than as a tool call. These are the SAME
+  // reads the opening brief is built from, so the assistant knows them without
+  // asking and cannot contradict the brief it just displayed. Compact on
+  // purpose, and best-effort like every other section.
+  try {
+    const [waiting, stale, openPromises] = await Promise.all([
+      listLoops({ state: "waiting", limit: 20 }),
+      staleLoops(),
+      listCommitments({ status: "open", limit: 20 }),
+    ]);
+    const waitingOnUser = waiting.filter((l) => l.waiting_on === "you");
+    const section: string[] = [];
+    if (waitingOnUser.length) {
+      section.push(
+        `Waiting on the user:\n` +
+          waitingOnUser
+            .map((l) => `- ${l.subject}: ${l.thread} (${l.last_touched_at.slice(0, 10)})`)
+            .join("\n")
+      );
+    }
+    if (stale.length) {
+      section.push(
+        `Gone quiet (not touched in 14+ days):\n` +
+          stale
+            .map((l) => `- ${l.subject}: ${l.thread} (${l.last_touched_at.slice(0, 10)})`)
+            .join("\n")
+      );
+    }
+    if (openPromises.length) {
+      section.push(
+        `Promises the user made and has not closed:\n` +
+          openPromises
+            .map((c) => `- ${c.text}${c.due_date ? ` (due ${c.due_date})` : ""}`)
+            .join("\n")
+      );
+    }
+    if (section.length) {
+      parts.push(`## Open loops and promises (facts — never re-ask these)\n${section.join("\n\n")}`);
+    }
+  } catch {
+    // no loops section
   }
 
   return parts.join("\n\n") || "New user — no data yet.";

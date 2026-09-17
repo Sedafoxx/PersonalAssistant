@@ -19,7 +19,8 @@
     "feed:test": "node --env-file=.env.local --import tsx scripts/feed-test.ts",
     "feed:rank": "node --env-file=.env.local --import tsx scripts/feed-rank-test.ts",
     "memory:test": "node --env-file=.env.local --import tsx scripts/memory-test.ts",
-    "review:test": "node --env-file=.env.local --import tsx scripts/review-test.ts"
+    "review:test": "node --env-file=.env.local --import tsx scripts/review-test.ts",
+    "brief:test": "node --env-file=.env.local --import tsx scripts/brief-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

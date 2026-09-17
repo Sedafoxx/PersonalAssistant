@@ -90,6 +90,33 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
     setInput((prev) => (prev ? `${prev} ${t}` : t).trim())
   );
 
+  // The opening brief: the state of the world for a genuinely fresh chat.
+  //
+  // DISPLAY ONLY, and that is the whole point. It is never persisted and never
+  // sent to the model, so the thread stays empty and the model's first turn is
+  // still the user's. If it were a message, the assistant would open the day by
+  // replying to its own greeting.
+  const [brief, setBrief] = useState<{ text: string } | null>(null);
+  // Fire it at most ONCE per mount: fetching is not something a render (or a
+  // switch back to an empty thread) is allowed to trigger again.
+  const briefFetchedRef = useRef(false);
+
+  // Ask for the brief, then show it only if it has something to say. Failures
+  // land on the same path as an empty brief — no bubble — because a greeting is
+  // never worth an error message.
+  const loadBrief = useCallback(async () => {
+    if (briefFetchedRef.current) return;
+    briefFetchedRef.current = true;
+    try {
+      const res = await fetch("/api/brief");
+      const data = await res.json();
+      const text = typeof data?.brief?.text === "string" ? data.brief.text.trim() : "";
+      if (data?.brief?.hasContent && text) setBrief({ text });
+    } catch {
+      // no brief bubble
+    }
+  }, []);
+
   // Load the stored thread and render it, falling back to the welcome bubble when
   // it is empty. Always runs inside an effect (never during render) so the server
   // and first client render match. The server merges the legacy coach thread in,
@@ -97,6 +124,15 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
   const loadThread = useCallback(async () => {
     const id = getThreadId();
     threadIdRef.current = id;
+    // A pre-filled prompt (?prompt=reflection) means the user has already been
+    // put into a task: opening with a brief would talk over it.
+    let prefilled = false;
+    try {
+      prefilled =
+        new URLSearchParams(window.location.search).get("prompt") === "reflection";
+    } catch {
+      // no query string available
+    }
     try {
       const res = await fetch(`/api/chat?client_id=${encodeURIComponent(id)}`);
       const data = await res.json();
@@ -107,12 +143,22 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
         .filter((r) => r.role === "user" || r.role === "assistant")
         .map((r) => ({ role: r.role as "user" | "assistant", content: r.content }));
       setMessages(restored.length > 0 ? restored : [WELCOME]);
+      // Only a genuinely empty thread gets a brief, and never alongside a
+      // pre-filled prompt. Fire-and-forget: the chat renders immediately either
+      // way, and a failure simply shows no bubble.
+      if (restored.length === 0 && !prefilled) {
+        void loadBrief();
+      } else {
+        setBrief(null);
+      }
     } catch {
-      // History is best-effort; show the welcome on failure.
+      // History is best-effort; show the welcome on failure. No brief either:
+      // an unknown history is not a fresh chat.
       setMessages([WELCOME]);
+      setBrief(null);
     }
     setMultiSel({});
-  }, []);
+  }, [loadBrief]);
 
   // Restore history on mount. `?mode=` deep links still work but no longer select
   // anything: there is only one conversation.
@@ -157,6 +203,10 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
     setMultiSel({});
     setAttachedFile(null);
     setFileError(null);
+    // A new chat is the daily case this brief exists for: show today's again
+    // rather than leaving a stale one from the previous thread on screen.
+    setBrief(null);
+    void loadBrief();
   }
 
   function send() {
@@ -323,6 +373,23 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
+        {/* The opening brief. Deliberately NOT a MessageBubble: no avatar, no
+            reply semantics, quieter than anything the assistant says — it is a
+            read of the record, not a turn in the conversation. Display-only, so
+            it never reaches history or the model. */}
+        {brief && (
+          <div className="mb-3">
+            <div className="flex items-center gap-2 px-1 mb-1">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500">
+                Brief
+              </span>
+              <span className="text-[10px] text-gray-600">read from your record</span>
+            </div>
+            <div className="max-w-[80%] px-3.5 py-2.5 rounded-xl border border-white/5 bg-white/[0.02] text-xs leading-relaxed text-gray-400 whitespace-pre-wrap">
+              {brief.text}
+            </div>
+          </div>
+        )}
         {messages.map((m, i) => (
           <div key={i}>
             <MessageBubble message={m} />
