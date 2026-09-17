@@ -6,6 +6,8 @@ import { hasReflectionToday } from "./reflection";
 import { hasOpenMorningCheckin, getGoalReview } from "./coach";
 import { generateSuggestions } from "./suggestions";
 import { daysUntil } from "./dates";
+import { captureCheck } from "./commitments";
+import { listLoops, staleLoops } from "./loops";
 
 export type NotifyKind = "morning" | "evening" | "goal_review";
 
@@ -65,6 +67,12 @@ export async function runNotificationRun(kind: NotifyKind) {
   let coachNudge = false;
   let goalReviewNudge = false;
   let dueSoonNudge = false;
+  // Morning-only memory sections (P6a). Each is best-effort: a failure leaves
+  // that section out entirely rather than breaking the run.
+  let uncaptured: { quote: string; suggested: string }[] = [];
+  let waitingOnYou: { subject: string; thread: string }[] = [];
+  let stale: { subject: string; thread: string }[] = [];
+  let memoryNudge = false;
 
   if (kind === "goal_review") {
     // Weekly goal check-in: nudge a reflection, naming goals that need attention.
@@ -159,6 +167,59 @@ export async function runNotificationRun(kind: NotifyKind) {
     } catch {
       // non-fatal — a nudge failure must never break the run
     }
+
+    // 2e. Memory check (morning only): promises made yesterday that never became
+    // items, threads explicitly waiting on the user, and loops gone quiet. Each
+    // part is independent and best-effort — a failure omits only its own section.
+    //
+    // The point of this section is the failure mode it exists for: the assistant
+    // saying "noted" while nothing was actually written. So it reports what is
+    // MISSING from the record, not what is in it.
+    try {
+      uncaptured = (await captureCheck()).uncaptured;
+    } catch {
+      // section omitted
+    }
+    try {
+      waitingOnYou = (await listLoops({ state: "waiting", limit: 20 }))
+        .filter((loop) => loop.waiting_on === "you")
+        .map((loop) => ({ subject: loop.subject, thread: loop.thread }));
+    } catch {
+      // section omitted
+    }
+    try {
+      stale = (await staleLoops()).map((loop) => ({
+        subject: loop.subject,
+        thread: loop.thread,
+      }));
+    } catch {
+      // section omitted
+    }
+
+    // One extra nudge, and only when there is something to say. Silence means the
+    // record is complete and nothing is blocked on him.
+    try {
+      const lines: string[] = [];
+      if (uncaptured.length > 0) {
+        const names = uncaptured.slice(0, 2).map((entry) => entry.suggested || entry.quote);
+        lines.push(`yesterday, said but never recorded: ${names.join(", ")}`);
+      }
+      if (waitingOnYou.length > 0) {
+        const names = waitingOnYou.slice(0, 3).map((loop) => loop.thread);
+        lines.push(`waiting on you: ${names.join(", ")}`);
+      }
+      if (lines.length > 0) {
+        sent += await pushAll({
+          title: "Memory check",
+          body: lines.join(" · "),
+          icon: "/icon-192.png",
+          url: "/?tab=coach",
+        });
+        memoryNudge = true;
+      }
+    } catch {
+      // non-fatal — the summary fields below are still reported
+    }
   }
 
   // 3. Daily self-improvement pass — learn from recent usage and add fresh
@@ -179,5 +240,11 @@ export async function runNotificationRun(kind: NotifyKind) {
     dueSoonNudge,
     goalReviewNudge,
     suggestionsAdded,
+    // Morning memory check (P6a). Always present, empty when there is nothing to
+    // report — an absent field would be indistinguishable from a failed section.
+    memoryNudge,
+    uncaptured,
+    waitingOnYou,
+    staleLoops: stale,
   };
 }

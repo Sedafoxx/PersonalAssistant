@@ -17,7 +17,8 @@
     "ask:deploy": "npm run ask:prepare && ask deploy",
     "coach:test": "node --env-file=.env.local --import tsx scripts/coach-test.ts",
     "feed:test": "node --env-file=.env.local --import tsx scripts/feed-test.ts",
-    "feed:rank": "node --env-file=.env.local --import tsx scripts/feed-rank-test.ts"
+    "feed:rank": "node --env-file=.env.local --import tsx scripts/feed-rank-test.ts",
+    "memory:test": "node --env-file=.env.local --import tsx scripts/memory-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

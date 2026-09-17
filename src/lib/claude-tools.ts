@@ -60,8 +60,165 @@ import {
   getActiveFacts,
   setFactStatus,
 } from "./memory";
+import {
+  createCommitment,
+  listCommitments,
+  closeCommitment,
+  getCommitment,
+} from "./commitments";
+import {
+  listLoops,
+  upsertLoop,
+  setLoopState,
+  getLoop,
+  type LoopState,
+  type WaitingOn,
+} from "./loops";
+
+// Commitments ledger + open loops tools (P6a). Declared separately and spread
+// into TOOL_DEFINITIONS so the additions stay grouped and reviewable.
+const COMMITMENT_LOOP_TOOLS: OpenAI.ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "log_commitment",
+      description:
+        "Log a promise the USER just made as a real todo plus a ledger row. Call this the moment they say they will do something themselves (e.g. 'I will call the dentist tomorrow', 'ich kaufe morgen Karotten'). Logging the same promise twice is treated as a duplicate, so it is safe to call. NEVER log your OWN suggestions, offers, hypotheticals, or something already in the past.",
+      parameters: {
+        type: "object",
+        properties: {
+          text: {
+            type: "string",
+            description: "Short imperative todo, e.g. 'Call the dentist'.",
+          },
+          due: {
+            type: "string",
+            description: "Optional due day 'YYYY-MM-DD'.",
+          },
+        },
+        required: ["text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_commitments",
+      description:
+        "List the promises the user has made, with their due dates. Defaults to the open ones.",
+      parameters: {
+        type: "object",
+        properties: {
+          status: {
+            type: "string",
+            enum: ["open", "done", "dropped"],
+            description: "Filter by status. Defaults to open.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "close_commitment",
+      description:
+        "Close a logged commitment by id - mark it done or dropped. Get the id from list_commitments first. This also completes or archives its linked todo.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The commitment UUID." },
+          status: {
+            type: "string",
+            enum: ["done", "dropped"],
+            description: "done (kept the promise) or dropped (let it go).",
+          },
+        },
+        required: ["id", "status"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_loop",
+      description:
+        "Track an unfinished thread tied to a person or project (e.g. 'waiting on the landlord about the heating'). Writing the same subject+thread again UPDATES that thread instead of duplicating it, so it is always safe to call.",
+      parameters: {
+        type: "object",
+        properties: {
+          subject: {
+            type: "string",
+            description: "The person or project, e.g. 'Theresa'.",
+          },
+          thread: {
+            type: "string",
+            description: "The open thread, e.g. 'Owes me the venue answer'.",
+          },
+          state: {
+            type: "string",
+            enum: ["open", "waiting", "done"],
+            description: "Default open.",
+          },
+          waiting_on: {
+            type: "string",
+            enum: ["you", "them"],
+            description: "Who owes the next move.",
+          },
+          detail: { type: "string", description: "Optional detail." },
+          due: {
+            type: "string",
+            description: "Optional due day 'YYYY-MM-DD'.",
+          },
+        },
+        required: ["subject", "thread"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "update_loop",
+      description:
+        "Move an open loop forward by id: change its state, who it is waiting on, or its detail. Get the id from list_loops first.",
+      parameters: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "The loop UUID." },
+          state: { type: "string", enum: ["open", "waiting", "done"] },
+          waiting_on: { type: "string", enum: ["you", "them"] },
+          detail: { type: "string" },
+        },
+        required: ["id", "state"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_loops",
+      description:
+        "List open loops (unfinished threads), optionally scoped to one subject or state.",
+      parameters: {
+        type: "object",
+        properties: {
+          subject: {
+            type: "string",
+            description: "Optional subject to filter by.",
+          },
+          state: {
+            type: "string",
+            enum: ["open", "waiting", "done"],
+            description: "Filter by state.",
+          },
+        },
+      },
+    },
+  },
+];
 
 export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
+  ...COMMITMENT_LOOP_TOOLS,
   {
     type: "function",
     function: {
@@ -1383,6 +1540,134 @@ export async function executeTool(
         live.value +
         ". I do not delete facts on my own - confirm it in the Coach tab and it will go."
       );
+    }
+
+    case "log_commitment": {
+      const text = (input.text as string | undefined)?.trim();
+      if (!text) return "Tell me what you promised to do.";
+      const { commitment, duplicate } = await createCommitment({
+        text,
+        due_date: (input.due as string | undefined) ?? null,
+        source: "coach",
+      });
+      if (duplicate) {
+        return "That promise is already logged: " + commitment.text + ".";
+      }
+      const when = commitment.due_date ? " (due " + commitment.due_date + ")" : "";
+      return "Logged: " + commitment.text + when + ". I made a todo for it too.";
+    }
+
+    case "list_commitments": {
+      const status = (input.status as "open" | "done" | "dropped" | undefined) ?? "open";
+      const rows = await listCommitments({ status, limit: 20 });
+      if (!rows.length) {
+        return status === "open"
+          ? "No open promises right now."
+          : "Nothing with status " + status + ".";
+      }
+      const lines = rows.map(
+        (c) =>
+          "- " +
+          c.text +
+          (c.due_date ? " (due " + c.due_date + ")" : "") +
+          " [" +
+          c.status +
+          "]"
+      );
+      return "Promises (" + status + "):\n" + lines.join("\n");
+    }
+
+    case "close_commitment": {
+      const id = input.id as string | undefined;
+      const status = input.status as "done" | "dropped" | undefined;
+      if (!id || (status !== "done" && status !== "dropped")) {
+        return "Give me the commitment id, and whether it is done or dropped.";
+      }
+      const row = await getCommitment(id);
+      if (!row) {
+        return "No commitment with that id. Call list_commitments to get a real one.";
+      }
+      await closeCommitment(id, status);
+      return (
+        (status === "done" ? "Marked done: " : "Dropped: ") +
+        row.text +
+        (row.item_id ? " (its todo was updated too)." : ".")
+      );
+    }
+
+    case "open_loop": {
+      const subject = (input.subject as string | undefined)?.trim();
+      const thread = (input.thread as string | undefined)?.trim();
+      if (!subject || !thread) {
+        return "Tell me the person or project, and the open thread.";
+      }
+      const loop = await upsertLoop({
+        subject,
+        thread,
+        state: (input.state as LoopState | undefined) ?? "open",
+        waiting_on: (input.waiting_on as WaitingOn | undefined) ?? null,
+        detail: input.detail as string | undefined,
+        due_date: (input.due as string | undefined) ?? null,
+      });
+      const who =
+        loop.waiting_on === "you"
+          ? " - waiting on you"
+          : loop.waiting_on === "them"
+            ? " - waiting on them"
+            : "";
+      return "Loop tracked: " + loop.subject + " / " + loop.thread + who + ".";
+    }
+
+    case "update_loop": {
+      const id = input.id as string | undefined;
+      const state = input.state as LoopState | undefined;
+      if (!id || (state !== "open" && state !== "waiting" && state !== "done")) {
+        return "Give me the loop id and a state (open, waiting or done).";
+      }
+      const loop = await getLoop(id);
+      if (!loop) {
+        return "No loop with that id. Call list_loops to get a real one.";
+      }
+      if (input.detail !== undefined) {
+        await upsertLoop({
+          subject: loop.subject,
+          thread: loop.thread,
+          state,
+          waiting_on: (input.waiting_on as WaitingOn | undefined) ?? loop.waiting_on,
+          detail: input.detail as string,
+        });
+      } else {
+        await setLoopState(
+          id,
+          state,
+          (input.waiting_on as WaitingOn | undefined) ?? undefined
+        );
+      }
+      return "Loop updated: " + loop.subject + " / " + loop.thread + " -> " + state + ".";
+    }
+
+    case "list_loops": {
+      const subject = input.subject as string | undefined;
+      const state = input.state as string | undefined;
+      const rows = await listLoops({ subject, state, limit: 30 });
+      if (!rows.length) {
+        return state
+          ? "No loops with state " + state + "."
+          : "No open loops right now.";
+      }
+      const lines = rows.map(
+        (l) =>
+          "- " +
+          l.subject +
+          " / " +
+          l.thread +
+          " [" +
+          l.state +
+          (l.waiting_on ? " on " + l.waiting_on : "") +
+          "]" +
+          (l.due_date ? " (due " + l.due_date + ")" : "")
+      );
+      return "Open loops:\n" + lines.join("\n");
     }
 
     default:

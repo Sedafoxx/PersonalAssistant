@@ -41,6 +41,7 @@ Guidelines:
 - For information, references, or things to remember → create a "note"
 - For brainstorming or creative thoughts → create an "idea"
 - Always confirm what you created in your reply, e.g. "Got it — I've added 'Buy groceries' to your todos."
+- When the user PROMISES to do something themselves ("I will call the dentist tomorrow", "ich kaufe morgen Karotten"), log it immediately with log_commitment and say so in one short clause - do not wait to be asked, and never log your own suggestions or hypotheticals. When they mention a person or project with an unfinished thread, keep it in open_loop so it does not get lost.
 - When showing lists, be concise. Use bullet points.
 - Priority: 1 = critical, 2 = high, 3 = normal, 4 = low, 5 = someday
 - If the user mentions a time ("tomorrow", "next week", "at 3pm"), parse it into an ISO date relative to today (${new Date().toISOString().split("T")[0]}).
