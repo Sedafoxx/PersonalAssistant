@@ -8,6 +8,7 @@ import { generateSuggestions } from "./suggestions";
 import { daysUntil } from "./dates";
 import { captureCheck } from "./commitments";
 import { listLoops, staleLoops } from "./loops";
+import { latestReview, formatReviewForMorning, type ReviewObservation } from "./review";
 
 export type NotifyKind = "morning" | "evening" | "goal_review";
 
@@ -72,6 +73,7 @@ export async function runNotificationRun(kind: NotifyKind) {
   let uncaptured: { quote: string; suggested: string }[] = [];
   let waitingOnYou: { subject: string; thread: string }[] = [];
   let stale: { subject: string; thread: string }[] = [];
+  let reviewObservations: ReviewObservation[] = [];
   let memoryNudge = false;
 
   if (kind === "goal_review") {
@@ -196,6 +198,20 @@ export async function runNotificationRun(kind: NotifyKind) {
       // section omitted
     }
 
+    // Last night's review (P6b). Best-effort, and deliberately still folded into
+    // the ONE "Memory check" notification below rather than sent as its own
+    // push: the morning is bounded at one memory push, so adding the nightly
+    // review must not add a second buzz. An empty observations array — the
+    // normal, clean-night case — leaves the message exactly as it was.
+    let reviewLine = "";
+    try {
+      const review = await latestReview();
+      reviewObservations = review?.observations ?? [];
+      reviewLine = formatReviewForMorning(review);
+    } catch {
+      // section omitted
+    }
+
     // One extra nudge, and only when there is something to say. Silence means the
     // record is complete and nothing is blocked on him.
     try {
@@ -208,6 +224,7 @@ export async function runNotificationRun(kind: NotifyKind) {
         const names = waitingOnYou.slice(0, 3).map((loop) => loop.thread);
         lines.push(`waiting on you: ${names.join(", ")}`);
       }
+      if (reviewLine) lines.push(reviewLine);
       if (lines.length > 0) {
         sent += await pushAll({
           title: "Memory check",
@@ -246,5 +263,8 @@ export async function runNotificationRun(kind: NotifyKind) {
     uncaptured,
     waitingOnYou,
     staleLoops: stale,
+    // Last night's review findings (P6b). Always present — an absent field would
+    // be indistinguishable from a failed nightly review.
+    reviewObservations,
   };
 }
