@@ -194,9 +194,18 @@ function ageLabel(days: number): string {
 }
 
 // A review observation is authoritative prose; keep the topic, cap the rest.
+//
+// The cap breaks on a WORD boundary. Cutting at a fixed character count produced
+// lines like "gemüse: karotten und paprika vor..." which reads like a corrupted
+// record rather than a short one — and this text is the first thing the user
+// sees in the morning, so it has to look deliberate.
 function observationLine(o: ReviewObservation): string {
   const text = `${o.topic ? `${o.topic} — ` : ""}${o.text}`;
-  return text.length > 120 ? `${text.slice(0, 117)}...` : text;
+  if (text.length <= 120) return text;
+  const cut = text.slice(0, 117);
+  const lastSpace = cut.lastIndexOf(" ");
+  const trimmed = lastSpace > 80 ? cut.slice(0, lastSpace) : cut;
+  return `${trimmed} …`;
 }
 
 // Compress a group of facts sharing a shape into as few lines as possible, so
