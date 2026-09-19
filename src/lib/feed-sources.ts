@@ -379,6 +379,56 @@ export interface PodcastSearch {
   source: "spotify" | "itunes";
 }
 
+/** The episode id inside a Spotify episode link, or null. Pure. */
+export function spotifyEpisodeId(url: string): string | null {
+  const m = url.match(/open\.spotify\.com\/episode\/([A-Za-z0-9]+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Descriptions for episodes the feed ALREADY stored, found by SEARCH.
+ *
+ * Why not the obvious call: `GET /v1/episodes?ids=` answers **403 Forbidden** for
+ * this app. Spotify restricts the episode endpoints to apps with extended access,
+ * and a brand-new Development-mode app does not have it. That was verified rather
+ * than assumed — the token is issued fine (200), search works, and the bulk endpoint
+ * returns `{"error":{"status":403,"message":"Forbidden"}}`. So the description is
+ * looked up the way the feed already finds episodes: by search, matched on the
+ * episode ID, which is EXACT — no fuzzy title matching and no wrong episode's text.
+ *
+ * Why it matters at all: podcast rows written before the description was captured
+ * have none, and a card with no text is a door, not a post. The first live page of
+ * the scroll was six podcasts in a row with nothing to read.
+ */
+export async function spotifyEpisodeDescriptionsViaSearch(
+  items: { episodeId: string; title: string }[]
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!items.length) return out;
+  const token = await spotifyToken();
+  if (!token) return out;
+
+  for (const item of items) {
+    try {
+      const res = await fetch(
+        `https://api.spotify.com/v1/search?q=${encodeURIComponent(item.title)}` +
+          `&type=episode&limit=10&market=AT`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      if (!res.ok) continue;
+      const data = (await res.json()) as {
+        episodes?: { items?: { id?: string; description?: string }[] };
+      };
+      const match = (data.episodes?.items ?? []).find((e) => e.id === item.episodeId);
+      const text = match?.description ? clean(match.description, 300) : "";
+      if (text) out.set(item.episodeId, text);
+    } catch {
+      // one failed lookup must not lose the others
+    }
+  }
+  return out;
+}
+
 async function spotifyToken(): Promise<string | null> {
   const id = process.env.SPOTIFY_CLIENT_ID;
   const secret = process.env.SPOTIFY_CLIENT_SECRET;

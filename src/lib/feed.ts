@@ -18,6 +18,7 @@ import { createServiceClient } from "./supabase";
 import { getGoals } from "./goals";
 import { getMilestones } from "./milestones";
 import { fetchPageText } from "./web";
+import { spotifyEpisodeDescriptionsViaSearch, spotifyEpisodeId } from "./feed-sources";
 import { getTopics, getActiveFacts, formatForContext } from "./memory";
 import { getCategories, getJournalEntries } from "./journal";
 import { getItems } from "./db";
@@ -97,6 +98,34 @@ export interface FeedItem {
 
 const ITEM_COLS =
   "id,url,kind,platform,title,summary,creator,published_at,duration_seconds,image_url,validated,matched_interest_id,status,surfaced_day,created_at,updated_at";
+
+/**
+ * Keep a page from opening with six of the same thing.
+ *
+ * Scoring sorts by relevance only, so the highest-scoring run of the whole store can
+ * easily be one kind — the first live page was six podcasts in a row, which reads as
+ * a narrower feed than the user asked for. The day's shortlist already has a
+ * diversity rule; this is the same idea applied to a page: at most `maxRun` of a
+ * kind in a row, then the best item of another kind. Order WITHIN a page only, so
+ * paging stays a straight slice and can never skip or repeat an item.
+ */
+function interleaveKinds(items: RankedItem[], maxRun = 2): RankedItem[] {
+  const out: RankedItem[] = [];
+  const rest = [...items];
+  while (rest.length) {
+    const lastKind = out.length ? out[out.length - 1].item.kind : null;
+    let trailingRun = 0;
+    for (let i = out.length - 1; i >= 0 && out[i].item.kind === lastKind; i--) trailingRun++;
+
+    let pickIndex = 0;
+    if (lastKind && trailingRun >= maxRun) {
+      const i = rest.findIndex((r) => r.item.kind !== lastKind);
+      if (i !== -1) pickIndex = i;
+    }
+    out.push(rest.splice(pickIndex, 1)[0]);
+  }
+  return out;
+}
 
 // The paged pool needs the judgement columns as well. It deliberately does NOT
 // include full_text: article bodies would ride along in every page payload.
@@ -2183,7 +2212,11 @@ export async function buildFeedPage(
       }))
     );
     const consumed = offset + rows.length;
-    return { items, nextOffset: consumed < poolSize ? consumed : null, poolSize };
+    return {
+      items: interleaveKinds(items),
+      nextOffset: consumed < poolSize ? consumed : null,
+      poolSize,
+    };
   } catch {
     return { items: [], nextOffset: null, poolSize: 0 };
   }
@@ -2401,4 +2434,82 @@ export async function readFeedItemText(
     const text = row.summary ?? null;
     return { text, source: text ? "stored" : "unavailable", chars: text?.length ?? 0 };
   }
+}
+
+// --- filling in what was never captured --------------------------------------
+
+/**
+ * Give stored items the text they should have had.
+ *
+ * Podcast rows created before the episode description was captured have none, and
+ * the live page showed the cost immediately: the top of the scroll was six podcasts
+ * in a row with nothing to read — the exact "list of doors" the user rejected. This
+ * The lookup goes through SEARCH, matched on the episode id, because the bulk
+ * episode endpoint answers 403 for this app — feed-sources records that finding
+ * where the call is. It is a repair rather than part of the daily refresh, and it is
+ * idempotent: it only ever looks at rows that still have no text.
+ */
+export async function backfillFeedDescriptions(): Promise<{
+  checked: number;
+  updated: number;
+  detail: string;
+}> {
+  const db = createServiceClient();
+  let rows: { id: string; url: string; title: string; platform: string }[] = [];
+  try {
+    const { data, error } = await db
+      .from("feed_items")
+      .select("id,url,title,platform")
+      .eq("kind", "podcast")
+      .is("summary", null)
+      .limit(200);
+    if (error) throw new Error(error.message);
+    rows = (data ?? []) as typeof rows;
+  } catch {
+    return { checked: 0, updated: 0, detail: "could not read the stored podcasts" };
+  }
+  if (!rows.length) {
+    return { checked: 0, updated: 0, detail: "every stored podcast already has text" };
+  }
+
+  const wanted: { episodeId: string; title: string; rowIds: string[] }[] = [];
+  for (const r of rows) {
+    const episodeId = spotifyEpisodeId(r.url);
+    if (!episodeId) continue;
+    const existing = wanted.find((w) => w.episodeId === episodeId);
+    if (existing) existing.rowIds.push(r.id);
+    else wanted.push({ episodeId, title: r.title, rowIds: [r.id] });
+  }
+
+  // Searched by the title we stored and matched on the episode id, so the text
+  // attached to a row is that episode's and never a neighbour's.
+  const descriptions = await spotifyEpisodeDescriptionsViaSearch(
+    wanted.map((w) => ({ episodeId: w.episodeId, title: w.title }))
+  );
+
+  let updated = 0;
+  for (const w of wanted) {
+    const text = descriptions.get(w.episodeId);
+    if (!text) continue;
+    for (const rowId of w.rowIds) {
+      try {
+        const { error } = await db
+          .from("feed_items")
+          .update({ summary: text, updated_at: new Date().toISOString() })
+          .eq("id", rowId);
+        if (!error) updated++;
+      } catch {
+        // one failed row must not stop the rest
+      }
+    }
+  }
+
+  const nonSpotify = rows.filter((r) => !spotifyEpisodeId(r.url)).length;
+  return {
+    checked: rows.length,
+    updated,
+    detail:
+      `${rows.length} podcast row(s) had no text; ${updated} filled in by Spotify ` +
+      `search; ${nonSpotify} left alone (Apple links)`,
+  };
 }
