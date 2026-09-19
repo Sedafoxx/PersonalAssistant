@@ -89,6 +89,27 @@ async function main(): Promise<void> {
       belowBar.length ? `found ${belowBar.length} item(s) below the bar` : "all at or above"
     );
 
+    // THE COMPLAINT THIS GUARDS, verbatim: "i do not see any articles or like posts."
+    // The pool holds four kinds; a page that shows one of them is the failure, and it
+    // is invisible to every check that only counts items — 12 is 12 whether they are
+    // twelve podcasts or a mix. So the mix itself is asserted.
+    const pageKinds = new Set(first.items.map((i) => i.item.kind));
+    const { data: kindRows } = await db
+      .from("feed_items")
+      .select("kind")
+      .eq("status", "new")
+      .eq("validated", true)
+      .gte("score", MIN_SCORE);
+    const poolKinds = new Set(
+      ((kindRows ?? []) as { kind: string }[]).map((r) => r.kind)
+    );
+    check(
+      "1d. the first page mixes the kinds that exist in the pool",
+      pageKinds.size >= Math.min(3, poolKinds.size),
+      `${pageKinds.size} kind(s) on the page (${[...pageKinds].join(", ")}) ` +
+        `of ${poolKinds.size} available (${[...poolKinds].join(", ")})`
+    );
+
     const second =
       first.nextOffset === null
         ? { items: [], nextOffset: null, poolSize: first.poolSize }

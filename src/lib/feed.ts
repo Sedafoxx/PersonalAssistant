@@ -109,13 +109,26 @@ const ITEM_COLS =
  * kind in a row, then the best item of another kind. Order WITHIN a page only, so
  * paging stays a straight slice and can never skip or repeat an item.
  */
-function interleaveKinds(items: RankedItem[], maxRun = 2): RankedItem[] {
-  // Mix WITHIN a score band, never across one: relevance is the promise, so a
-  // 5/5 item is never demoted behind a 4/5 one to improve the look.
-  //
-  // Doing it per band is what actually fixes the skew. Ties inside a band are
-  // broken by recency, so without this the newest batch of a single kind won every
-  // tie and the first live page read as eight podcasts out of twelve.
+/**
+ * The order a feed is READ in: mixed, and never at the cost of relevance.
+ *
+ * THE PROBLEM THIS SOLVES, measured on the live pool: 59 items above the bar —
+ * 30 podcasts, 16 videos, 8 articles, 5 posts — where every article sat at 3 while
+ * the podcasts and videos took every 4 and 5. Sorted by score alone, the first page
+ * was twelve podcasts and videos and the articles never appeared at all. The user,
+ * for the third time: "i do not see any articles or like posts."
+ *
+ * So: round-robin across KINDS within each score band, with a per-kind cap, and then
+ * append everything that did not make the capped pass in plain score order.
+ *
+ * Two properties matter more than the look:
+ *   - relevance is never faked: mixing happens WITHIN a band, so a 4/5 item is never
+ *     placed ahead of a 5/5 one;
+ *   - nothing is ever hidden: pass 2 appends the rest in score order, so the cap
+ *     mixes the top of the feed without dropping an item out of it.
+ */
+function orderForFeed(items: RankedItem[], limit: number): RankedItem[] {
+  const cap = Math.max(2, Math.round(limit * 0.34)); // ~4 of a 12-item page
   const bands = new Map<number, RankedItem[]>();
   for (const item of items) {
     const band = bands.get(item.score) ?? [];
@@ -124,28 +137,44 @@ function interleaveKinds(items: RankedItem[], maxRun = 2): RankedItem[] {
   }
 
   const out: RankedItem[] = [];
+  const used = new Set<string>();
+
   for (const score of [...bands.keys()].sort((a, b) => b - a)) {
-    out.push(...roundRobinKinds(bands.get(score) ?? [], maxRun));
-  }
-  return out;
-}
+    const band = bands.get(score) ?? [];
 
-/** At most `maxRun` of a kind in a row, then the best item of another kind. */
-function roundRobinKinds(items: RankedItem[], maxRun: number): RankedItem[] {
-  const out: RankedItem[] = [];
-  const rest = [...items];
-  while (rest.length) {
-    const lastKind = out.length ? out[out.length - 1].item.kind : null;
-    let trailingRun = 0;
-    for (let i = out.length - 1; i >= 0 && out[i].item.kind === lastKind; i--) trailingRun++;
-
-    let pickIndex = 0;
-    if (lastKind && trailingRun >= maxRun) {
-      const i = rest.findIndex((r) => r.item.kind !== lastKind);
-      if (i !== -1) pickIndex = i;
+    // Group the band by kind, keeping the order it already has (score, then
+    // recency) inside each kind.
+    const byKind = new Map<string, RankedItem[]>();
+    for (const item of band) {
+      const list = byKind.get(item.item.kind) ?? [];
+      list.push(item);
+      byKind.set(item.item.kind, list);
     }
-    out.push(rest.splice(pickIndex, 1)[0]);
+
+    // The kinds in the order they appear, so the rotation is deterministic.
+    const kinds = [...byKind.keys()];
+    const taken = new Map<string, number>();
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (const kind of kinds) {
+        const list = byKind.get(kind) ?? [];
+        const n = taken.get(kind) ?? 0;
+        if (n >= cap || n >= list.length) continue;
+        out.push(list[n]);
+        used.add(list[n].item.id);
+        taken.set(kind, n + 1);
+        progressed = true;
+      }
+    }
   }
+
+  // Pass 2: everything the cap held back, in score order. The cap reorders the top
+  // of the feed; it never removes an item from it.
+  for (const item of items) {
+    if (!used.has(item.item.id)) out.push(item);
+  }
+
   return out;
 }
 
@@ -2197,6 +2226,9 @@ export interface FeedPage {
   poolSize: number;
 }
 
+/** How much of the pool is ordered in memory before a page is sliced out of it. */
+const POOL_FETCH_MAX = 200;
+
 export async function buildFeedPage(
   opts: { limit?: number; offset?: number } = {}
 ): Promise<FeedPage> {
@@ -2204,6 +2236,13 @@ export async function buildFeedPage(
   const offset = Math.max(0, opts.offset ?? 0);
   const db = createServiceClient();
   try {
+    // Fetch the POOL, not the page, then order it, then slice.
+    //
+    // This is the difference between a mix and the illusion of one: ordering only
+    // the 12 rows of a page has nothing to mix WITH, because the page slice already
+    // happens in the database by score — which is how the first fix produced "a post
+    // and a video" and eleven podcasts anyway. The pool is bounded at 200 rows, which
+    // is far above the current 59 and keeps the query honest.
     const { data, error, count } = await db
       .from("feed_items")
       .select(POOL_COLS, { count: "exact" })
@@ -2213,7 +2252,7 @@ export async function buildFeedPage(
       .gte("score", MIN_SCORE)
       .order("score", { ascending: false })
       .order("created_at", { ascending: false })
-      .range(offset, offset + limit - 1);
+      .range(0, POOL_FETCH_MAX - 1);
     if (error) throw new Error(error.message);
 
     const rows = (data ?? []) as (FeedItem & {
@@ -2223,20 +2262,25 @@ export async function buildFeedPage(
       matched_goal_id: string | null;
     })[];
     const poolSize = count ?? rows.length;
-    const items = await withGoalTitles(
-      rows.map((item) => ({
-        item,
-        score: Number(item.score ?? MIN_SCORE),
-        reason: item.reason ?? "",
-        goal: "",
-        goalId: item.matched_goal_id,
-        bucket: (item.bucket === "fun" ? "fun" : "growth") as "growth" | "fun",
-      }))
+    const ordered = orderForFeed(
+      await withGoalTitles(
+        rows.map((item) => ({
+          item,
+          score: Number(item.score ?? MIN_SCORE),
+          reason: item.reason ?? "",
+          goal: "",
+          goalId: item.matched_goal_id,
+          bucket: (item.bucket === "fun" ? "fun" : "growth") as "growth" | "fun",
+        }))
+      ),
+      limit
     );
-    const consumed = offset + rows.length;
+
+    const page = ordered.slice(offset, offset + limit);
+    const consumed = offset + page.length;
     return {
-      items: interleaveKinds(items),
-      nextOffset: consumed < poolSize ? consumed : null,
+      items: page,
+      nextOffset: consumed < ordered.length ? consumed : null,
       poolSize,
     };
   } catch {

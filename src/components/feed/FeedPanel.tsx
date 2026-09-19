@@ -439,9 +439,6 @@ export function FeedPanel() {
                       <li key={r.item.id}>
                         <FeedCard
                           ranked={r}
-                          onOpen={() =>
-                            window.open(r.item.url, "_blank", "noopener,noreferrer")
-                          }
                           onSave={() => send(r.item.id, "save")}
                           onDismiss={() => send(r.item.id, "not_for_me")}
                         />
@@ -473,9 +470,6 @@ export function FeedPanel() {
               <li key={r.item.id}>
                 <FeedCard
                   ranked={r}
-                  onOpen={() =>
-                    window.open(r.item.url, "_blank", "noopener,noreferrer")
-                  }
                   onSave={() => send(r.item.id, "save")}
                   onDismiss={() => send(r.item.id, "not_for_me")}
                 />
@@ -597,12 +591,10 @@ export function FeedPanel() {
  */
 function FeedCard({
   ranked,
-  onOpen,
   onSave,
   onDismiss,
 }: {
   ranked: RankedItem;
-  onOpen: () => void;
   onSave: () => void;
   onDismiss: () => void;
 }) {
@@ -725,20 +717,36 @@ function FeedCard({
       )}
 
       <div className="flex gap-2 mt-3">
-        <button
-          onClick={toggleReader}
-          disabled={busy}
-          className="flex-1 h-10 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium transition-colors"
-        >
-          {reading ? "Close" : isMedia ? "What is it about" : "Read here"}
-        </button>
-        <button
-          onClick={onOpen}
-          title="Hand it to the app or the browser"
-          className="h-10 px-3 rounded-lg bg-white/5 text-gray-300 text-xs font-medium hover:bg-white/10 transition-colors"
-        >
-          Open
-        </button>
+        {/* For a video or a podcast the primary action IS the app handoff, so it has
+            to be a real LINK carrying the intent URL. It used to be a button calling
+            window.open(item.url) with the plain https URL — which is why tapping it
+            always opened the browser even though the title link did the right thing.
+            The user hit exactly that. */}
+        {isMedia ? (
+          <SmartLink
+            href={item.url}
+            className="flex-1 h-10 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors flex items-center justify-center"
+          >
+            {item.kind === "podcast" ? "Play in the app" : "Watch in the app"}
+          </SmartLink>
+        ) : (
+          <button
+            onClick={toggleReader}
+            disabled={busy}
+            className="flex-1 h-10 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium transition-colors"
+          >
+            {reading ? "Close" : "Read here"}
+          </button>
+        )}
+        {isMedia && item.summary && (
+          <button
+            onClick={toggleReader}
+            disabled={busy}
+            className="h-10 px-3 rounded-lg bg-white/5 text-gray-300 text-xs font-medium hover:bg-white/10 transition-colors"
+          >
+            {reading ? "Hide" : "About"}
+          </button>
+        )}
         <button
           onClick={onSave}
           className="h-10 px-3 rounded-lg bg-indigo-600/20 text-indigo-200 border border-indigo-500/30 text-xs font-medium hover:bg-indigo-600/30 transition-colors"
