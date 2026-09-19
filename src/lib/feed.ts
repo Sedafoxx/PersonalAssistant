@@ -17,6 +17,7 @@ import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
 import { getGoals } from "./goals";
 import { getMilestones } from "./milestones";
+import { fetchPageText } from "./web";
 import { getTopics, getActiveFacts, formatForContext } from "./memory";
 import { getCategories, getJournalEntries } from "./journal";
 import { getItems } from "./db";
@@ -97,6 +98,10 @@ export interface FeedItem {
 const ITEM_COLS =
   "id,url,kind,platform,title,summary,creator,published_at,duration_seconds,image_url,validated,matched_interest_id,status,surfaced_day,created_at,updated_at";
 
+// The paged pool needs the judgement columns as well. It deliberately does NOT
+// include full_text: article bodies would ride along in every page payload.
+const POOL_COLS = `${ITEM_COLS},score,reason,bucket,matched_goal_id`;
+
 export interface DiscoveryStats {
   tavilyCalls: number;
   found: number;
@@ -157,6 +162,13 @@ export interface DiscoveryOptions {
   maxInterests?: number;
   perSourceLimit?: number;
   tavilyBudget?: number;
+  /**
+   * Which pass over the interest rotation this is. Round 0 is the day's normal
+   * pass. A later round shifts the starting point so an on-demand top-up searches
+   * interests the day has NOT already covered, instead of re-finding what is
+   * already stored (which the url_norm dedupe would then throw away).
+   */
+  round?: number;
 }
 
 // --- LLM (mirrors coach.ts / journal.ts / memory.ts: DeepSeek-safe) ----------
@@ -863,7 +875,12 @@ export async function discoverCandidates(
   const dayOfYear = Math.floor(
     (start.getTime() - Date.UTC(start.getUTCFullYear(), 0, 0)) / 86_400_000
   );
-  const offset = pool.length ? dayOfYear % pool.length : 0;
+  // Each round shifts a whole pass further along the rotation, so round 1 starts
+  // where round 0 stopped rather than searching the same interests again.
+  const perRound = Math.max(1, maxInterests);
+  const offset = pool.length
+    ? (dayOfYear + (opts.round ?? 0) * perRound) % pool.length
+    : 0;
   const rotated = [...pool.slice(offset), ...pool.slice(0, offset)];
   const chosen = rotated.slice(0, Math.max(0, maxInterests));
 
@@ -2107,4 +2124,281 @@ export async function buildShortlist(day?: string): Promise<Shortlist> {
     newsChosen,
     newsSkippedByCap,
   };
+}
+
+// --- the paged pool (P8) ----------------------------------------------------
+//
+// THE PROBLEM. buildShortlist() answers "what are today's six items?" — and that was
+// the only question the tab could ask, so everything else that had already scored
+// 3+ was unreachable: 44 items, sitting on disk, refused. The user: "i wanna be able
+// to really scroll through a bunch of stuff".
+//
+// So the pool is read directly and paged, at the SAME bar. No new judgement is
+// invented for scrolling: an item that arrives by scrolling has passed exactly the
+// test that an item arriving as today's shortlist passed. When the pool runs out it
+// says so rather than padding — the honest end is a feature, not a failure.
+
+export interface FeedPage {
+  items: RankedItem[];
+  /** Pass back as ?offset= for the next page; null marks the honest end. */
+  nextOffset: number | null;
+  /** How many items meet the bar in total, so the UI can honestly say "12 of 44". */
+  poolSize: number;
+}
+
+export async function buildFeedPage(
+  opts: { limit?: number; offset?: number } = {}
+): Promise<FeedPage> {
+  const limit = Math.max(1, Math.min(50, opts.limit ?? 12));
+  const offset = Math.max(0, opts.offset ?? 0);
+  const db = createServiceClient();
+  try {
+    const { data, error, count } = await db
+      .from("feed_items")
+      .select(POOL_COLS, { count: "exact" })
+      .eq("status", "new")
+      .eq("validated", true)
+      .not("score", "is", null)
+      .gte("score", MIN_SCORE)
+      .order("score", { ascending: false })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (error) throw new Error(error.message);
+
+    const rows = (data ?? []) as (FeedItem & {
+      score: number | null;
+      reason: string | null;
+      bucket: string | null;
+      matched_goal_id: string | null;
+    })[];
+    const poolSize = count ?? rows.length;
+    const items = await withGoalTitles(
+      rows.map((item) => ({
+        item,
+        score: Number(item.score ?? MIN_SCORE),
+        reason: item.reason ?? "",
+        goal: "",
+        goalId: item.matched_goal_id,
+        bucket: (item.bucket === "fun" ? "fun" : "growth") as "growth" | "fun",
+      }))
+    );
+    const consumed = offset + rows.length;
+    return { items, nextOffset: consumed < poolSize ? consumed : null, poolSize };
+  } catch {
+    return { items: [], nextOffset: null, poolSize: 0 };
+  }
+}
+
+export interface TopUpResult {
+  /** Unjudged candidates that were scored in this pass. */
+  ranked: number;
+  /** How many of those cleared the bar and became scrollable. */
+  added: number;
+  /** Candidates a fresh discovery round found (the only step that spends money). */
+  discovered: number;
+  /** True when there was nothing left to judge and nothing left to search. */
+  exhausted: boolean;
+  detail: string;
+}
+
+/**
+ * Find more to scroll, cheapest first.
+ *
+ * STEP 1 costs no search calls at all. The store holds candidates that were fetched,
+ * validated and never judged — 121 of 165 when this was written — because the daily
+ * run only ranks the day's fresh ones. Judging them is one model call, and it is
+ * also the reason an "endless" feed is affordable: most of the supply is already
+ * paid for.
+ *
+ * STEP 2 runs a real discovery pass, the only part that spends money (12 Tavily
+ * searches, roughly $0.10), so it runs only when step 1 had nothing to judge. The
+ * pass uses `round: 1`, which shifts the interest rotation so it searches interests
+ * the day's normal run did not touch.
+ */
+export async function topUpFeed(): Promise<TopUpResult> {
+  const db = createServiceClient();
+
+  // --- step 1: judge what is stored but unjudged ---------------------------
+  let unscored: FeedItem[] = [];
+  try {
+    const { data, error } = await db
+      .from("feed_items")
+      .select(ITEM_COLS)
+      .eq("status", "new")
+      .eq("validated", true)
+      .is("score", null)
+      .order("created_at", { ascending: false })
+      .limit(rankLimit());
+    if (error) throw new Error(error.message);
+    unscored = (data ?? []) as FeedItem[];
+  } catch {
+    unscored = [];
+  }
+
+  if (unscored.length) {
+    const interestText = new Map<string, string>();
+    try {
+      const { data } = await db.from("feed_interests").select("id,text");
+      for (const r of (data ?? []) as { id: string; text: string }[]) {
+        interestText.set(r.id, r.text);
+      }
+    } catch {
+      // labels are nice to have, not required
+    }
+
+    const goals = await loadRankGoals();
+    const result = await scoreCandidates(unscored, goals, { interestText });
+
+    // Persist the judgement, so the pool query can see it. Only the ones that
+    // cleared the bar matter for scrolling, but writing every score keeps the
+    // record of what was judged and stops the same rows being paid for twice.
+    let added = 0;
+    for (const s of result.scored) {
+      try {
+        const { error } = await db
+          .from("feed_items")
+          .update({
+            score: s.score,
+            reason: s.reason,
+            // The bucket is derived, not returned: P5's rubric is goals, so an item
+            // that serves an active goal is growth and one that does not is fun.
+            bucket: s.goalId ? "growth" : "fun",
+            matched_goal_id: s.goalId,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", s.item.id);
+        if (error) throw new Error(error.message);
+        if (s.score >= MIN_SCORE) added++;
+      } catch {
+        // one failed write must not lose the rest
+      }
+    }
+
+    return {
+      ranked: result.scored.length,
+      added,
+      discovered: 0,
+      exhausted: false,
+      detail:
+        `judged ${result.scored.length} already-stored candidate(s); ` +
+        `${added} cleared ${MIN_SCORE}+ and are now scrollable (no search calls spent)`,
+    };
+  }
+
+  // --- step 2: nothing left to judge, so go and find some ------------------
+  const interests = await getInterests();
+  const discovery = await discoverCandidates(interests, { round: 1 });
+  const saved = await saveCandidates(
+    discovery.candidates,
+    new Map(interests.map((i) => [i.id, i.id]))
+  );
+
+  if (!saved.inserted) {
+    return {
+      ranked: 0,
+      added: 0,
+      discovered: 0,
+      exhausted: true,
+      detail:
+        `a fresh discovery round found nothing new (${discovery.candidates.length} ` +
+        `candidate(s) seen, all already stored) — the pool is genuinely empty`,
+    };
+  }
+
+  // The fresh rows have no score yet, so the same shortlist call that ranks the
+  // day's pool is used to judge them — one code path, not two.
+  await buildShortlist().catch(() => null);
+
+  return {
+    ranked: 0,
+    added: 0,
+    discovered: saved.inserted,
+    exhausted: false,
+    detail:
+      `judged everything stored, so a new discovery round ran: ` +
+      `${discovery.candidates.length} candidate(s), ${saved.inserted} new ` +
+      `(interests rotated by one pass; ${discovery.stats.tavilyCalls} Tavily call(s))`,
+  };
+}
+
+// --- reading an item inside the app -----------------------------------------
+
+export interface ReaderText {
+  text: string | null;
+  /** Where the text came from, so the UI can be honest about it. */
+  source: "stored" | "fetched" | "unavailable";
+  chars: number;
+}
+
+/** The columns the reader needs. Named, so a cast cannot collapse to never. */
+interface ItemTextRow {
+  id: string;
+  url: string;
+  kind: string;
+  summary: string | null;
+  full_text: string | null;
+}
+
+/**
+ * The text to read for one item, fetching and KEEPING it the first time.
+ *
+ * Articles are fetched once and stored, so a second open costs nothing. Videos and
+ * podcasts are NOT fetched: their pages carry no readable body (a YouTube watch page
+ * is a JavaScript shell, a Spotify episode page is a player), and pretending
+ * otherwise would produce either an empty reader or a page of boilerplate. For those
+ * the stored description is what there is, and the card says so by offering the app
+ * instead of a reader.
+ */
+export async function readFeedItemText(
+  id: string,
+  opts: { maxChars?: number } = {}
+): Promise<ReaderText> {
+  const maxChars = Math.max(500, Math.min(40000, opts.maxChars ?? 12000));
+  const db = createServiceClient();
+
+  let row: ItemTextRow | null = null;
+  try {
+    const { data, error } = await db
+      .from("feed_items")
+      .select("id,url,kind,summary,full_text")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    row = (data as ItemTextRow | null) ?? null;
+  } catch {
+    row = null;
+  }
+  if (!row) return { text: null, source: "unavailable", chars: 0 };
+
+  if (row.full_text && row.full_text.length > 200) {
+    return { text: row.full_text.slice(0, maxChars), source: "stored", chars: row.full_text.length };
+  }
+
+  if (row.kind !== "article") {
+    const text = row.summary?.trim() || null;
+    return { text, source: text ? "stored" : "unavailable", chars: text?.length ?? 0 };
+  }
+
+  try {
+    const fetched = await fetchPageText(row.url, maxChars);
+    const text = fetched?.trim() ?? "";
+    if (text.length < 200) {
+      return { text: row.summary ?? null, source: row.summary ? "stored" : "unavailable", chars: row.summary?.length ?? 0 };
+    }
+    // Keep it: the next open is free, and the feed stops depending on a live page.
+    try {
+      await db
+        .from("feed_items")
+        .update({ full_text: text, full_text_at: new Date().toISOString() })
+        .eq("id", id);
+    } catch {
+      // storing is an optimisation, not a requirement
+    }
+    return { text, source: "fetched", chars: text.length };
+  } catch {
+    // A page that cannot be fetched still gives the snippet rather than a blank
+    // reader — a paywall or a bot wall is normal, not an error worth showing.
+    const text = row.summary ?? null;
+    return { text, source: text ? "stored" : "unavailable", chars: text?.length ?? 0 };
+  }
 }

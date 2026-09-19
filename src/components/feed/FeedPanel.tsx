@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SmartLink } from "@/components/SmartLink";
 
 // The Feed tab (P4): the day's ranked shortlist, and nothing else.
@@ -150,6 +150,22 @@ export function FeedPanel() {
   const [answered, setAnswered] = useState<Set<string>>(new Set());
   const [refreshing, setRefreshing] = useState(false);
 
+  // --- the scrollable pool (P8) -------------------------------------------
+  //
+  // Separate from the day's shortlist on purpose. The shortlist is today's six
+  // curated picks; the pool is every other item that cleared the SAME bar (3+,
+  // unanswered), ordered by score. Keeping them apart is what lets the tab be
+  // honest: "today's picks" first, then "more of the same quality" — never a
+  // prettied-up second helping passed off as a first.
+  const [pageItems, setPageItems] = useState<RankedItem[]>([]);
+  const [nextOffset, setNextOffset] = useState<number | null>(null);
+  const [poolSize, setPoolSize] = useState(0);
+  const [started, setStarted] = useState(false);
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [moreNote, setMoreNote] = useState("");
+  const [drained, setDrained] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+
   const fetchFeed = useCallback(async () => {
     try {
       const res = await fetch("/api/feed");
@@ -167,6 +183,97 @@ export function FeedPanel() {
   useEffect(() => {
     fetchFeed();
   }, [fetchFeed]);
+
+  // One page of the pool, and then one more when the bottom comes into view.
+  //
+  // The order matters for cost: page the pool first (free, it is already stored),
+  // and only ask for new material when the pool is genuinely empty. /api/feed/more
+  // is the only call that can spend money, so it is never on a timer and never on
+  // a page turn.
+  const loadMore = useCallback(async () => {
+    if (moreBusy || drained) return;
+    setMoreBusy(true);
+    try {
+      const wantOffset = started ? nextOffset : 0;
+
+      if (wantOffset !== null) {
+        const res = await fetch(`/api/feed?offset=${wantOffset}&limit=12`);
+        const data = (await res.json()) as {
+          page?: { items: RankedItem[]; nextOffset: number | null; poolSize: number };
+        };
+        const page = data.page;
+        if (!page) {
+          setMoreNote("Could not load more right now.");
+          return;
+        }
+        setPageItems((prev) => {
+          const seen = new Set(prev.map((p) => p.item.id));
+          return [...prev, ...page.items.filter((i) => !seen.has(i.item.id))];
+        });
+        setNextOffset(page.nextOffset);
+        setPoolSize(page.poolSize);
+        setStarted(true);
+        if (page.nextOffset === null) {
+          setMoreNote("That is the whole pool above your bar.");
+        }
+        return;
+      }
+
+      // The pool is exhausted, so look for more material. The answer says what it
+      // did (judged stored candidates, or ran a real discovery round), and that is
+      // shown rather than hidden — it is also the moment money is spent.
+      const res = await fetch("/api/feed/more", { method: "POST" });
+      const data = (await res.json()) as {
+        exhausted?: boolean;
+        added?: number;
+        discovered?: number;
+        detail?: string;
+      };
+      setMoreNote(data.detail ?? "");
+
+      if (data.exhausted) {
+        setDrained(true);
+        return;
+      }
+
+      const after = await fetch(`/api/feed?offset=${pageItems.length}&limit=12`);
+      const afterData = (await after.json()) as {
+        page?: { items: RankedItem[]; nextOffset: number | null; poolSize: number };
+      };
+      const page = afterData.page;
+      if (!page || page.items.length === 0) {
+        // Nothing new cleared the bar. That is the honest end of the scroll, and it
+        // is said plainly rather than filled with something weaker.
+        setDrained(true);
+        return;
+      }
+      setPageItems((prev) => {
+        const seen = new Set(prev.map((p) => p.item.id));
+        return [...prev, ...page.items.filter((i) => !seen.has(i.item.id))];
+      });
+      setNextOffset(page.nextOffset);
+      setPoolSize(page.poolSize);
+    } catch (err) {
+      setMoreNote((err as Error).message);
+    } finally {
+      setMoreBusy(false);
+    }
+  }, [moreBusy, drained, started, nextOffset, pageItems.length]);
+
+  // The visible bottom IS the trigger, with a margin so the next page is usually
+  // there before it is reached.
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadMore();
+      },
+      { rootMargin: "400px" }
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, [loadMore]);
 
   // The single write path: every card action is a POST of (item_id, signal).
   // On success the card leaves the list; on failure it comes back with the
@@ -347,6 +454,49 @@ export function FeedPanel() {
           )}
         </section>
 
+        {/* More of the same quality: the rest of the pool, paged.
+            The heading states the count, and the line at the very bottom says
+            plainly when there is nothing left above the bar. */}
+        <section>
+          <h3 className="text-[11px] uppercase tracking-wide text-gray-500 px-1 mb-2">
+            More, same bar
+            {poolSize > 0 && (
+              <span className="text-gray-600 normal-case tracking-normal">
+                {" "}
+                · {pageItems.length} of {poolSize}
+              </span>
+            )}
+          </h3>
+
+          <ul className="space-y-2">
+            {pageItems.map((r) => (
+              <li key={r.item.id}>
+                <FeedCard
+                  ranked={r}
+                  onOpen={() =>
+                    window.open(r.item.url, "_blank", "noopener,noreferrer")
+                  }
+                  onSave={() => send(r.item.id, "save")}
+                  onDismiss={() => send(r.item.id, "not_for_me")}
+                />
+              </li>
+            ))}
+          </ul>
+
+          {/* The trigger. Kept in the DOM while there is more to come. */}
+          <div ref={sentinelRef} className="h-6" aria-hidden="true" />
+
+          <p className="text-center text-[11px] text-gray-500 py-2 leading-relaxed">
+            {moreBusy
+              ? "Looking for more…"
+              : !started
+                ? ""
+                : drained
+                  ? "That is everything above your bar. Nothing was padded in."
+                  : moreNote || "Keep scrolling for the rest."}
+          </p>
+        </section>
+
         {/* Saved — finite on purpose. */}
         {view && view.saved.length > 0 && (
           <section>
@@ -433,6 +583,18 @@ export function FeedPanel() {
   );
 }
 
+/**
+ * One item, readable where it is.
+ *
+ * THE POINT: a feed of doors is not a feed you can scroll. So a card carries the
+ * substance — the coach's reason, and on open the actual text — and only falls back
+ * to a plain link when there is genuinely nothing to read (a video's description is
+ * a description; playing happens in the app, and saying so is better than an empty
+ * reader).
+ *
+ * The text is fetched ONCE, on first open, and kept server-side, so re-opening costs
+ * nothing and the feed stops depending on a live page.
+ */
 function FeedCard({
   ranked,
   onOpen,
@@ -446,6 +608,50 @@ function FeedCard({
 }) {
   const { item, reason, bucket, score } = ranked;
   const host = hostLabel(item.url);
+  const [reading, setReading] = useState(false);
+  const [reader, setReader] = useState<{
+    text: string | null;
+    source: string;
+    chars: number;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const isMedia = item.kind === "video" || item.kind === "podcast";
+
+  const toggleReader = useCallback(async () => {
+    if (reading) {
+      setReading(false);
+      return;
+    }
+    setReading(true);
+    if (reader) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/feed/text?id=${encodeURIComponent(item.id)}`);
+      const data = await res.json();
+      setReader({
+        text: typeof data.text === "string" ? data.text : null,
+        source: String(data.source ?? "unavailable"),
+        chars: Number(data.chars ?? 0),
+      });
+    } catch {
+      setReader({ text: null, source: "unavailable", chars: 0 });
+    } finally {
+      setBusy(false);
+    }
+  }, [reading, reader, item.id]);
+
+  // Say where the words came from. A snippet is not an article and a description is
+  // not a transcript, and calling them what they are costs nothing.
+  const sourceLabel = !reader
+    ? ""
+    : reader.source === "fetched"
+      ? "read from the page just now"
+      : reader.text && isMedia
+        ? "the description — playing happens in the app"
+        : reader.text
+          ? "the stored snippet; the page itself could not be read (paywall or bot wall)"
+          : "this one could not be read here";
 
   return (
     <div className="bg-[#1a1a1a] border border-white/10 rounded-xl p-3.5">
@@ -480,10 +686,56 @@ function FeedCard({
 
       <p className="text-xs text-gray-500 mt-2 leading-snug">because {reason}</p>
 
+      {/* The text itself, in place. */}
+      {item.summary && !reading && (
+        <p className="text-xs text-gray-400 mt-2 leading-relaxed line-clamp-3">
+          {item.summary}
+        </p>
+      )}
+
+      {reading && (
+        <div className="mt-3 border-t border-white/10 pt-3">
+          {busy ? (
+            <p className="text-xs text-gray-500">Getting the text…</p>
+          ) : (
+            <>
+              <p className="text-[10px] uppercase tracking-wide text-gray-600 mb-1.5">
+                {sourceLabel}
+              </p>
+              {reader?.text ? (
+                <div className="max-h-[60vh] overflow-y-auto pr-1">
+                  <p className="text-[13px] text-gray-300 leading-relaxed whitespace-pre-wrap">
+                    {reader.text}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  Nothing readable was stored for this one.
+                </p>
+              )}
+              <SmartLink
+                href={item.url}
+                className="inline-block mt-2 text-[11px] text-indigo-400 underline underline-offset-2"
+              >
+                {isMedia ? "Open in the app" : "Open the original"}
+              </SmartLink>
+            </>
+          )}
+        </div>
+      )}
+
       <div className="flex gap-2 mt-3">
         <button
+          onClick={toggleReader}
+          disabled={busy}
+          className="flex-1 h-10 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-medium transition-colors"
+        >
+          {reading ? "Close" : isMedia ? "What is it about" : "Read here"}
+        </button>
+        <button
           onClick={onOpen}
-          className="flex-1 h-10 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition-colors"
+          title="Hand it to the app or the browser"
+          className="h-10 px-3 rounded-lg bg-white/5 text-gray-300 text-xs font-medium hover:bg-white/10 transition-colors"
         >
           Open
         </button>

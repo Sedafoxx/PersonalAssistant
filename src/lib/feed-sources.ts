@@ -414,6 +414,7 @@ async function spotifyEpisodes(query: string, token: string): Promise<Candidate[
           external_urls?: { spotify?: string };
           duration_ms?: number;
           release_date?: string;
+          description?: string;
           images?: { url?: string }[];
           show?: { name?: string };
         }[];
@@ -427,7 +428,9 @@ async function spotifyEpisodes(query: string, token: string): Promise<Candidate[
         platform: "spotify",
         title: clean(e.name),
         creator: e.show?.name ? clean(e.show.name) : null,
-        summary: null,
+        // The episode description: without it a podcast card is a title and nothing
+        // else, since an episode page has no readable body to fetch.
+        summary: e.description ? clean(e.description, 300) : null,
         published_at: isoDate(e.release_date),
         duration_seconds:
           typeof e.duration_ms === "number" ? Math.round(e.duration_ms / 1000) : null,
@@ -451,6 +454,7 @@ async function itunesEpisodes(query: string): Promise<Candidate[]> {
         trackViewUrl?: string;
         trackTimeMillis?: number;
         releaseDate?: string;
+        description?: string;
         artworkUrl600?: string;
       }[];
     };
@@ -462,7 +466,7 @@ async function itunesEpisodes(query: string): Promise<Candidate[]> {
         platform: "apple",
         title: clean(e.trackName),
         creator: e.collectionName ? clean(e.collectionName) : null,
-        summary: null,
+        summary: e.description ? clean(e.description, 300) : null,
         published_at: isoDate(e.releaseDate),
         duration_seconds:
           typeof e.trackTimeMillis === "number"

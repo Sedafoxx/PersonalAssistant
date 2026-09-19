@@ -1,5 +1,11 @@
-import { NextResponse } from "next/server";
-import { buildShortlist, getInterests, withGoalTitles, type FeedItem } from "@/lib/feed";
+import { NextRequest, NextResponse } from "next/server";
+import {
+  buildShortlist,
+  buildFeedPage,
+  getInterests,
+  withGoalTitles,
+  type FeedItem,
+} from "@/lib/feed";
 import { createServiceClient } from "@/lib/supabase";
 
 export const dynamic = "force-dynamic";
@@ -56,14 +62,37 @@ async function loadPrefs(): Promise<{ daily_count: number; daily_minutes: number
   }
 }
 
-// GET /api/feed -> { shortlist, saved, interests, prefs }
-export async function GET() {
+// GET /api/feed            -> { shortlist, saved, interests, prefs }
+// GET /api/feed?offset=12  -> adds `page`, the next slice of the scrollable pool.
+//
+// The page is a SECOND, separate read rather than more of the shortlist: the
+// shortlist is the day's six curated items, and the pool is everything else that
+// cleared the same bar. Keeping them apart is what lets the tab say honestly
+// "today's picks" and then keep going without pretending the rest are picks.
+export async function GET(req: NextRequest) {
   try {
-    const [shortlist, interests, prefs] = await Promise.all([
-      buildShortlist(),
+    const sp = req.nextUrl.searchParams;
+    const wantsPage = sp.has("offset") || sp.has("page");
+    const offset = Number(sp.get("offset") ?? 0) || 0;
+    const limit = Number(sp.get("limit") ?? 12) || 12;
+
+    const [shortlist, interests, prefs, page] = await Promise.all([
+      wantsPage ? Promise.resolve(null) : buildShortlist(),
       getInterests(),
       loadPrefs(),
+      wantsPage
+        ? buildFeedPage({ offset, limit })
+        : Promise.resolve(null),
     ]);
+
+    if (wantsPage) {
+      // A page-only request skips the shortlist and the saved list entirely: it is
+      // the scroll asking for more, not the tab reloading.
+      return NextResponse.json({ page });
+    }
+    if (!shortlist) {
+      return NextResponse.json({ error: "No shortlist" }, { status: 500 });
+    }
 
     // Every shortlist item carries the goal TITLE it is grouped under, resolved
     // through getGoals and safe when the goal row is missing.
