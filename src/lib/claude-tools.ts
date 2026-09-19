@@ -73,6 +73,7 @@ import {
   getLoop,
   type LoopState,
   type WaitingOn,
+  type LoopKind,
 } from "./loops";
 import { getBacklog, formatBacklogForContext, type Backlog } from "./backlog";
 
@@ -171,6 +172,17 @@ const COMMITMENT_LOOP_TOOLS: OpenAI.ChatCompletionTool[] = [
             type: "string",
             description: "Optional due day 'YYYY-MM-DD'.",
           },
+          kind: {
+            type: "string",
+            enum: ["person", "project", "topic"],
+            description:
+              "What the thread is about: 'person' for a human, 'project' for work you own, otherwise 'topic'.",
+          },
+          next_step: {
+            type: "string",
+            description:
+              "The ONE next concrete move. A thread with a state but no next step is a note, not something that can be planned.",
+          },
         },
         required: ["subject", "thread"],
       },
@@ -189,6 +201,16 @@ const COMMITMENT_LOOP_TOOLS: OpenAI.ChatCompletionTool[] = [
           state: { type: "string", enum: ["open", "waiting", "done"] },
           waiting_on: { type: "string", enum: ["you", "them"] },
           detail: { type: "string" },
+          kind: {
+            type: "string",
+            enum: ["person", "project", "topic"],
+            description: "Correct what the thread is about.",
+          },
+          next_step: {
+            type: "string",
+            description:
+              "Replace the thread's next concrete move (empty string clears it).",
+          },
         },
         required: ["id", "state"],
       },
@@ -1628,6 +1650,8 @@ export async function executeTool(
         waiting_on: (input.waiting_on as WaitingOn | undefined) ?? null,
         detail: input.detail as string | undefined,
         due_date: (input.due as string | undefined) ?? null,
+        kind: (input.kind as LoopKind | undefined) ?? "topic",
+        next_step: (input.next_step as string | undefined) ?? null,
       });
       const who =
         loop.waiting_on === "you"
@@ -1635,7 +1659,12 @@ export async function executeTool(
           : loop.waiting_on === "them"
             ? " - waiting on them"
             : "";
-      return "Loop tracked: " + loop.subject + " / " + loop.thread + who + ".";
+      // A thread with no next step is half-recorded, so say so out loud instead of
+      // reporting a tidy success.
+      const next = loop.next_step
+        ? " Next: " + loop.next_step
+        : " No next step yet - propose one.";
+      return "Thread tracked: " + loop.subject + " / " + loop.thread + who + "." + next;
     }
 
     case "update_loop": {
@@ -1648,13 +1677,21 @@ export async function executeTool(
       if (!loop) {
         return "No loop with that id. Call list_loops to get a real one.";
       }
-      if (input.detail !== undefined) {
+      // Anything beyond the state needs the full upsert (which also touches
+      // last_touched_at, so a thread that moves does not go stale by accident).
+      const wantsFields =
+        input.detail !== undefined ||
+        input.next_step !== undefined ||
+        input.kind !== undefined;
+      if (wantsFields) {
         await upsertLoop({
           subject: loop.subject,
           thread: loop.thread,
           state,
           waiting_on: (input.waiting_on as WaitingOn | undefined) ?? loop.waiting_on,
-          detail: input.detail as string,
+          detail: (input.detail as string | undefined) ?? loop.detail ?? undefined,
+          kind: (input.kind as LoopKind | undefined) ?? loop.kind,
+          next_step: (input.next_step as string | undefined) ?? loop.next_step,
         });
       } else {
         await setLoopState(
@@ -1663,7 +1700,7 @@ export async function executeTool(
           (input.waiting_on as WaitingOn | undefined) ?? undefined
         );
       }
-      return "Loop updated: " + loop.subject + " / " + loop.thread + " -> " + state + ".";
+      return "Thread updated: " + loop.subject + " / " + loop.thread + " -> " + state + ".";
     }
 
     case "list_loops": {
@@ -1677,7 +1714,9 @@ export async function executeTool(
       }
       const lines = rows.map(
         (l) =>
-          "- " +
+          "- [" +
+          l.kind +
+          "] " +
           l.subject +
           " / " +
           l.thread +
@@ -1685,9 +1724,10 @@ export async function executeTool(
           l.state +
           (l.waiting_on ? " on " + l.waiting_on : "") +
           "]" +
-          (l.due_date ? " (due " + l.due_date + ")" : "")
+          (l.due_date ? " (due " + l.due_date + ")" : "") +
+          (l.next_step ? " - next: " + l.next_step : " - no next step yet")
       );
-      return "Open loops:\n" + lines.join("\n");
+      return "Threads:\n" + lines.join("\n");
     }
 
     case "list_backlog": {

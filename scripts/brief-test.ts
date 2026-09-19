@@ -536,13 +536,20 @@ async function testCoachContext(tablesOk: boolean): Promise<void> {
     await seedWaitingLoop(subject, thread, 5);
     await seedPromise(`BriefTest coach promise ${unique}`, null);
 
+    // The section is called "Threads and promises" since M3 (threads became the
+    // entity layer). The old title is asserted as ABSENT too, so a rename cannot
+    // quietly leave the check passing against a section that no longer exists.
     const context = await buildCoachContext();
-    const sectionIdx = context.indexOf("## Open loops and promises");
+    const sectionIdx = context.indexOf("## Threads and promises");
+    const staleTitleIdx = context.indexOf("## Open loops and promises");
     const threadIdx = context.indexOf(thread);
     check(
       "behavioural",
-      "6a. the context carries an open-loops-and-promises section naming the seeded thread",
-      sectionIdx !== -1 && threadIdx !== -1 && sectionIdx < threadIdx,
+      "6a. the context carries a threads-and-promises section naming the seeded thread",
+      sectionIdx !== -1 &&
+        staleTitleIdx === -1 &&
+        threadIdx !== -1 &&
+        sectionIdx < threadIdx,
       `section@${sectionIdx} thread@${threadIdx}`
     );
     check(
@@ -552,13 +559,15 @@ async function testCoachContext(tablesOk: boolean): Promise<void> {
       "promise line present"
     );
     // The section must come AFTER living memory — the plan puts it there so the
-    // maintained facts stay adjacent.
-    const livingIdx = context.indexOf("## Living memory");
+    // The threads section must come after the RETRIEVED memory block (M1 replaced
+    // the old "Living memory" dump), and that block must actually be present —
+    // otherwise this check would pass on two -1s and prove nothing.
+    const memoryIdx = context.indexOf("## What Nova knows about the user");
     check(
       "behavioural",
-      "6c. it follows the living-memory block",
-      livingIdx === -1 || sectionIdx > livingIdx,
-      `living-memory@${livingIdx} loops@${sectionIdx}`
+      "6c. it follows the retrieved-memory block, which is present",
+      memoryIdx !== -1 && sectionIdx !== -1 && sectionIdx > memoryIdx,
+      `memory@${memoryIdx} threads@${sectionIdx}`
     );
   } catch (err) {
     check("behavioural", "6. coach context", false, errText(err));

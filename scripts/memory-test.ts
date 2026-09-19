@@ -24,6 +24,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createServiceClient } from "../src/lib/supabase";
 import { deleteItem } from "../src/lib/db";
+import { buildCoachContext } from "../src/lib/coach";
 import {
   extractCommitments,
   looksLikeCommitment,
@@ -396,6 +397,56 @@ async function testLoopLifecycle(tablesOk: boolean): Promise<void> {
       "5e. a DONE thread can be re-opened as a new live row (partial index by design)",
       reopened.id !== loop.id && reopened.state === "open",
       `state=${reopened.state} newId=${reopened.id !== loop.id}`
+    );
+
+    // --- M3: a thread is an entity you can move, not a sentence --------------
+    const tSubject = `MemTest Theresa ${unique}`;
+    const tThread = "Owes me the venue answer";
+    const threadRow = await upsertLoop({
+      subject: tSubject,
+      thread: tThread,
+      kind: "person",
+      next_step: "ask her at the party",
+      state: "waiting",
+      waiting_on: "them",
+    });
+    created.loops.add(threadRow.id);
+    check(
+      "behavioural",
+      "5f. a thread carries a kind and a next step, and reads back with both",
+      threadRow.kind === "person" && threadRow.next_step === "ask her at the party",
+      `kind=${threadRow.kind} next_step="${threadRow.next_step}"`
+    );
+
+    const movedForward = await upsertLoop({
+      subject: tSubject,
+      thread: tThread,
+      next_step: "draft the message",
+    });
+    check(
+      "behavioural",
+      "5g. a next step is REPLACED (not accumulated) and the kind survives the write",
+      movedForward.next_step === "draft the message" &&
+        movedForward.kind === "person" &&
+        movedForward.id === threadRow.id,
+      `next_step="${movedForward.next_step}" kind=${movedForward.kind} sameRow=${movedForward.id === threadRow.id}`
+    );
+
+    // The property that makes M3 worth anything: the context the model receives
+    // must show the thread as a state PLUS a next step, not as prose it can only
+    // read back.
+    const threadContext = await buildCoachContext({
+      intent: "what should I do about the venue answer",
+    });
+    check(
+      "behavioural",
+      "5h. the coach context renders the thread with its kind and its next step",
+      threadContext.includes(tSubject) &&
+        threadContext.includes("draft the message") &&
+        threadContext.includes("person " + tSubject),
+      threadContext.includes(tSubject)
+        ? "the thread reaches the model with its next step"
+        : "the thread is MISSING from the coach context"
     );
   } catch (err) {
     check("behavioural", "5. loop lifecycle", false, errText(err));

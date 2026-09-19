@@ -17,7 +17,7 @@ import {
   type FactKind,
 } from "./memory";
 import { embedMany } from "./embeddings";
-import { listLoops, staleLoops } from "./loops";
+import { listLoops, staleLoops, type OpenLoop } from "./loops";
 import { listCommitments } from "./commitments";
 import { getBacklog, formatBacklogForContext } from "./backlog";
 
@@ -137,6 +137,21 @@ function formatDayLine(i: Item): string {
 /** What memory is retrieved against when no message says otherwise. */
 export const DEFAULT_MEMORY_INTENT =
   "planning the user's day, moving their goals forward, and what is happening in their life";
+
+/**
+ * One thread, in the form a coach can act on: what it is about, where it stands,
+ * when it was last touched, and the next concrete move.
+ *
+ * `kind` and `next_step` exist because a thread with a state but no next step is a
+ * note — and a note is not something you can put in a day. Missing a next step is
+ * stated explicitly rather than left blank, so the absence is visible and the coach
+ * is nudged to propose one instead of only re-reading the thread.
+ */
+function formatThread(l: OpenLoop): string {
+  const kind = l.kind && l.kind !== "topic" ? `${l.kind} ` : "";
+  const next = l.next_step ? ` — next: ${l.next_step}` : " — no next step yet";
+  return `- ${kind}${l.subject}: ${l.thread} (${l.last_touched_at.slice(0, 10)})${next}`;
+}
 
 // Compact digest of who the user is right now (memory layer v1).
 /**
@@ -318,29 +333,47 @@ export async function buildCoachContext(
   // asking and cannot contradict the brief it just displayed. Compact on
   // purpose, and best-effort like every other section.
   try {
-    const [waiting, stale, openPromises] = await Promise.all([
-      listLoops({ state: "waiting", limit: 20 }),
+    // ALL live threads — not only the ones waiting on the user.
+    //
+    // Before this, the context carried "waiting on you" and "gone quiet" and
+    // nothing else, so a thread waiting on SOMEONE ELSE reached the model through
+    // no group at all. That is precisely the "I am blocked on Theresa's answer"
+    // case, which is the thing a coach should have in front of it when planning.
+    // (The M3 test caught this: a thread waiting on someone else, touched a second
+    // earlier, appeared nowhere.)
+    const [threads, stale, openPromises] = await Promise.all([
+      listLoops({ limit: 50 }),
       staleLoops(),
       listCommitments({ status: "open", limit: 20 }),
     ]);
-    const waitingOnUser = waiting.filter((l) => l.waiting_on === "you");
-    const section: string[] = [];
-    if (waitingOnUser.length) {
-      section.push(
-        `Waiting on the user:\n` +
-          waitingOnUser
-            .map((l) => `- ${l.subject}: ${l.thread} (${l.last_touched_at.slice(0, 10)})`)
-            .join("\n")
-      );
-    }
-    if (stale.length) {
-      section.push(
-        `Gone quiet (not touched in 14+ days):\n` +
-          stale
-            .map((l) => `- ${l.subject}: ${l.thread} (${l.last_touched_at.slice(0, 10)})`)
-            .join("\n")
-      );
-    }
+    const live = threads.filter((l) => l.state !== "done");
+    const staleIds = new Set(stale.map((s) => s.id));
+    const waitingOnUser = live.filter(
+      (l) => l.state === "waiting" && l.waiting_on === "you"
+    );
+    const waitingOnThem = live.filter(
+      (l) => l.state === "waiting" && l.waiting_on === "them"
+    );
+    const openThreads = live.filter((l) => l.state === "open" && !staleIds.has(l.id));
+
+    const group = (
+      label: string,
+      rows: typeof live,
+      max = 8
+    ): string[] =>
+      rows.length
+        ? [`${label}\n` + rows.slice(0, max).map(formatThread).join("\n")]
+        : [];
+
+    const section: string[] = [
+      ...group("Waiting on the user:", waitingOnUser),
+      ...group(
+        "Waiting on someone else (you are blocked - keep the next step ready):",
+        waitingOnThem
+      ),
+      ...group("Open threads you own:", openThreads),
+      ...group("Gone quiet (not touched in 14+ days):", stale),
+    ];
     if (openPromises.length) {
       section.push(
         `Promises the user made and has not closed:\n` +
@@ -350,7 +383,11 @@ export async function buildCoachContext(
       );
     }
     if (section.length) {
-      parts.push(`## Open loops and promises (facts — never re-ask these)\n${section.join("\n\n")}`);
+      parts.push(
+        `## Threads and promises (people and projects — never re-ask these)\n` +
+          `A thread with a state but no next step is a note; a thread with a next step is something you can put in a day.\n` +
+          section.join("\n\n")
+      );
     }
   } catch {
     // no loops section
@@ -523,6 +560,11 @@ export async function extractMemories(
   const res = await llm().chat.completions.create({
     model: MODEL,
     response_format: { type: "json_object" },
+    // temperature 0: extraction is parsing, not writing. The same sentence should
+    // produce the same fact, or the store churns ("twice a week" one turn, "two
+    // times per week" the next) and de-duplication by key has nothing stable to
+    // match on.
+    temperature: 0,
     messages: [
       { role: "system", content: MEMORY_SYSTEM },
       { role: "user", content: exchange },

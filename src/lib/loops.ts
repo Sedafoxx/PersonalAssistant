@@ -9,10 +9,16 @@ import { getTopics, getActiveFacts } from "./memory";
 // turns them into real rows so a thread can be listed, aged and closed.
 
 const COLS =
-  "id,subject,thread,state,waiting_on,detail,due_date,last_touched_at,created_at,updated_at";
+  "id,subject,thread,state,waiting_on,detail,due_date,kind,next_step,last_touched_at,created_at,updated_at";
 
 export type LoopState = "open" | "waiting" | "done";
 export type WaitingOn = "you" | "them" | null;
+/**
+ * What the thread is ABOUT. A coach plans against people and projects; `topic` is
+ * the honest default for a thread that is neither (and for the rows that existed
+ * before this was recorded).
+ */
+export type LoopKind = "person" | "project" | "topic";
 
 export interface OpenLoop {
   id: string;
@@ -22,6 +28,9 @@ export interface OpenLoop {
   waiting_on: WaitingOn;
   detail: string | null;
   due_date: string | null;
+  kind: LoopKind;
+  /** The ONE next concrete move. A thread with a state but no next step is a note. */
+  next_step: string | null;
   last_touched_at: string;
   created_at: string;
   updated_at: string;
@@ -74,6 +83,8 @@ export async function upsertLoop(input: {
   waiting_on?: WaitingOn;
   detail?: string;
   due_date?: string | null;
+  kind?: LoopKind;
+  next_step?: string | null;
 }): Promise<OpenLoop> {
   const subject = input.subject.trim();
   const thread = input.thread.trim();
@@ -103,6 +114,9 @@ export async function upsertLoop(input: {
     if (input.detail !== undefined) patch.detail = input.detail.trim() || null;
     if (input.due_date !== undefined)
       patch.due_date = isDayString(input.due_date) ? input.due_date : null;
+    if (input.kind !== undefined) patch.kind = input.kind;
+    if (input.next_step !== undefined)
+      patch.next_step = input.next_step?.trim() || null;
 
     const { data, error } = await db
       .from("open_loops")
@@ -123,6 +137,8 @@ export async function upsertLoop(input: {
       waiting_on: input.waiting_on ?? null,
       detail: input.detail?.trim() || null,
       due_date: isDayString(input.due_date) ? input.due_date : null,
+      kind: input.kind ?? "topic",
+      next_step: input.next_step?.trim() || null,
       last_touched_at: now,
     })
     .select(COLS)

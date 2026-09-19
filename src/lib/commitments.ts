@@ -218,6 +218,11 @@ export async function extractCommitments(
     const res = await llm().chat.completions.create({
       model: MODEL,
       response_format: { type: "json_object" },
+      // temperature 0: this is PARSING, not writing. The same sentence must yield
+      // the same promise every time, or the ledger's own de-duplication (which
+      // compares the words of the promise) fails against its own rephrasing and
+      // the same promise becomes two items with two due dates.
+      temperature: 0,
       messages: [
         { role: "system", content: COMMITMENT_SYSTEM },
         { role: "user", content: exchange },
