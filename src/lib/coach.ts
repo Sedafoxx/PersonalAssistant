@@ -8,7 +8,8 @@ import { listUpcomingEvents, createEvent } from "./calendar";
 import { getDay, getDayMetrics, listLeftovers, findDayTaskByTitle } from "./day";
 import { getMilestonesByGoal, type Milestone } from "./milestones";
 import { logicalDay } from "./dates";
-import { formatForContext, upsertFact, curateTopic } from "./memory";
+import { retrieveMemory, upsertFact, curateTopic, factText } from "./memory";
+import { embedMany } from "./embeddings";
 import { listLoops, staleLoops } from "./loops";
 import { listCommitments } from "./commitments";
 import { getBacklog, formatBacklogForContext } from "./backlog";
@@ -126,10 +127,23 @@ function formatDayLine(i: Item): string {
   return `- [P${p}, ${req}] ${time}${done}${i.title}${goal}`;
 }
 
+/** What memory is retrieved against when no message says otherwise. */
+export const DEFAULT_MEMORY_INTENT =
+  "planning the user's day, moving their goals forward, and what is happening in their life";
+
 // Compact digest of who the user is right now (memory layer v1).
-export async function buildCoachContext(): Promise<string> {
+/**
+ * Build the live context digest.
+ *
+ * `intent` is what the memory layer retrieves against — normally the user's own
+ * message, so the facts that reach the prompt are the ones relevant to what they
+ * actually asked. Without it, memory is selected for a generic planning moment.
+ */
+export async function buildCoachContext(
+  opts: { intent?: string } = {}
+): Promise<string> {
   const db = createServiceClient();
-  const [goals, entries, goalState, people, open, memRes] = await Promise.all([
+  const [goals, entries, goalState, people, open] = await Promise.all([
     getGoals("active"),
     getJournalEntries(30),
     db.from("coach_goal_state").select("goal_id,notes,last_action,last_outcome"),
@@ -140,12 +154,6 @@ export async function buildCoachContext(): Promise<string> {
       .in("status", ["proposed"])
       .order("day", { ascending: false })
       .limit(10),
-    db
-      .from("coach_memory")
-      .select("kind,text,created_at")
-      .order("pinned", { ascending: false })
-      .order("created_at", { ascending: false })
-      .limit(40),
   ]);
 
   const parts: string[] = [];
@@ -283,21 +291,19 @@ export async function buildCoachContext(): Promise<string> {
     );
   }
 
-  const memRows = (memRes.data ?? []) as { kind: string; text: string }[];
-  if (memRows.length) {
-    parts.push(
-      `## What you remember about the user (long-term)\n` +
-        memRows.map((m) => `- [${m.kind}] ${m.text}`).join("\n")
-    );
-  }
-
-  // Living memory: maintained (topic, key, value) facts — best-effort so a
-  // missing table can never break the chat.
+  // Memory: RETRIEVED for this moment, not dumped (M1).
+  //
+  // This replaces two wholesale blocks — 40 rows of free-text memory plus every
+  // living fact — which together were 8,470 of a 16,870-character prompt. Facts
+  // now arrive because they are relevant to the intent, with a floor of pinned
+  // and newest facts so something learned a minute ago is never invisible.
   try {
-    const living = await formatForContext();
-    if (living) parts.push(living);
+    const memory = await retrieveMemory(
+      opts.intent?.trim() || DEFAULT_MEMORY_INTENT
+    );
+    if (memory.block) parts.push(memory.block);
   } catch {
-    // no living-memory section
+    // no memory section — retrieveMemory already degrades to the full dump
   }
 
   // Loops and promises, as facts rather than as a tool call. These are the SAME
@@ -542,13 +548,36 @@ export async function extractMemories(
   // Curation is bounded to the topics that ACTUALLY changed, and to at most 2
   // per turn, because rewriting a topic summary costs a model call each.
   const changedTopics = new Set<string>();
-  for (const f of (parsed.facts ?? []).slice(0, 6)) {
-    const topic = (f.topic ?? "").trim();
-    const key = (f.key ?? "").trim();
-    const value = (f.value ?? "").trim();
-    if (!topic || !key || !value) continue;
+  const candidates = (parsed.facts ?? [])
+    .slice(0, 6)
+    .map((f) => ({
+      topic: (f.topic ?? "").trim(),
+      key: (f.key ?? "").trim(),
+      value: (f.value ?? "").trim(),
+    }))
+    .filter((f) => f.topic.length > 0 && f.key.length > 0 && f.value.length > 0);
+
+  // ONE embeddings request per turn, not one per fact: a turn can write six facts
+  // and a request each would add latency for nothing. A failed batch is not
+  // fatal — facts are still written without a vector and the backfill picks them
+  // up — but then each upsert embeds its own, so nothing stays unsearchable.
+  let vectors: (number[] | null)[] = [];
+  try {
+    vectors = await embedMany(candidates.map((f) => factText(f.topic, f.key, f.value)));
+  } catch {
+    vectors = [];
+  }
+
+  for (let i = 0; i < candidates.length; i++) {
+    const f = candidates[i];
     try {
-      const result = await upsertFact({ topic, key, value, source: "chat" });
+      const result = await upsertFact({
+        topic: f.topic,
+        key: f.key,
+        value: f.value,
+        source: "chat",
+        embedding: vectors[i] ?? undefined,
+      });
       if (result.changed && result.fact) changedTopics.add(result.fact.topic_id);
     } catch {
       // non-fatal

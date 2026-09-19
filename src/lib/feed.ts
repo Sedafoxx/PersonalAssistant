@@ -20,7 +20,6 @@ import { getMilestones } from "./milestones";
 import { getTopics, getActiveFacts, formatForContext } from "./memory";
 import { getCategories, getJournalEntries } from "./journal";
 import { getItems } from "./db";
-import { getCoachMemories } from "./coach";
 import { logicalDay } from "./dates";
 import {
   validate,
@@ -333,18 +332,11 @@ export async function gatherFitSignals(): Promise<string> {
     // no ideas section
   }
 
-  // Distilled free-text memory of past conversations.
-  try {
-    const memories = await getCoachMemories(60);
-    if (memories.length) {
-      parts.push(
-        `## What you remember about the user (long-term)\n` +
-          memories.map((m) => `- [${m.kind}] ${m.text}`).join("\n")
-      );
-    }
-  } catch {
-    // no memory section
-  }
+  // Memory is NOT dumped here any more (M1). The free-text store was read as an
+  // arbitrary "newest 60" window: 552 rows growing forever, of which a fixed
+  // slice was always shown and the rest were silently invisible. The feed's
+  // memory arrives through gatherFitSignals(), which retrieves the facts
+  // relevant to what this person actually wants.
 
   // Keep the digest to a size a model can actually cite from. Sections come in
   // a deliberate order — goals and milestones first — so a truncation loses the

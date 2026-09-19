@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
+import { embed, embedMany } from "./embeddings";
 
 // --- living memory ----------------------------------------------------------
 //
@@ -176,6 +177,29 @@ export interface UpsertFactInput {
   value: string;
   source?: string;
   pinned?: boolean;
+  /**
+   * Pre-computed embedding. Callers that write several facts at once (a chat
+   * turn can write six) embed them in ONE batched request and pass the vectors
+   * in; a caller that passes nothing gets a single best-effort embed here.
+   */
+  embedding?: number[] | null;
+}
+
+/**
+ * The text a fact is embedded as. The topic title is part of it because
+ * "tofu: none left" is ambiguous until you know the topic is the kitchen.
+ */
+export function factText(topicTitle: string, key: string, value: string): string {
+  return `${topicTitle} :: ${key}: ${value}`;
+}
+
+/** Best-effort embed: a failed embedding must never stop a fact being remembered. */
+async function safeEmbed(text: string): Promise<number[] | null> {
+  try {
+    return await embed(text);
+  } catch {
+    return null;
+  }
 }
 
 export interface UpsertFactResult {
@@ -239,6 +263,11 @@ export async function upsertFact(
     supersededId = live.id as string;
   }
 
+  // M1: embed on write — but only here, after the "pinned" and "same value"
+  // paths have already returned, so a no-op write costs no embedding call.
+  const embedding =
+    input.embedding ?? (await safeEmbed(factText(topic.title, key, value)));
+
   // 3 & 5. Insert the new active row.
   const { data: created, error: insErr } = await db
     .from("memory_facts")
@@ -249,6 +278,7 @@ export async function upsertFact(
       status: "active",
       pinned: input.pinned ?? false,
       source: input.source ?? null,
+      embedding,
     })
     .select(FACT_COLS)
     .maybeSingle();
@@ -425,4 +455,234 @@ export async function formatForContext(opts?: {
   } catch {
     return "";
   }
+}
+
+// --- retrieval (M1) ---------------------------------------------------------
+//
+// THE PROBLEM THIS SOLVES. formatForContext() dumps every fact it has: 8,470
+// characters of memory inside a 16,870-character coach prompt, facts included
+// because they exist rather than because the conversation needs them. At the same
+// time the prompt was missing things, because the free-text store was read as an
+// arbitrary "newest 60" window. Bigger and less informed at once.
+//
+// So: rank by meaning (embedding similarity) against what the user just asked,
+// always include a floor that cannot be missed, and fit an explicit budget.
+
+/** Default size of the retrieved block, in characters. */
+export const MEMORY_BUDGET_CHARS = 2600;
+
+/** Pinned facts, plus the newest few, are ALWAYS present — see retrieveMemory. */
+const FLOOR_RECENT = 10;
+
+/** One topic may not flood the block: at most this many of its facts get in. */
+const MAX_PER_TOPIC = 3;
+
+/** Cosine floor for a match. Permissive on purpose: the budget culls, not this. */
+const MATCH_THRESHOLD = 0.15;
+
+export interface RetrievedMemory {
+  block: string;
+  /** How many facts the block actually carries. */
+  facts: number;
+  chars: number;
+  /** True when retrieval failed and the full dump was used instead. */
+  usedFallback: boolean;
+}
+
+interface RankedFact {
+  id: string;
+  topic_id: string;
+  key: string;
+  value: string;
+  pinned: boolean;
+  similarity: number;
+}
+
+/** The embedding search itself. Throws — retrieveMemory decides what to do. */
+async function matchFacts(intent: string, limit: number): Promise<RankedFact[]> {
+  const db = createServiceClient();
+  const queryEmbedding = await embed(intent);
+  const { data, error } = await db.rpc("match_memory_facts", {
+    query_embedding: queryEmbedding,
+    match_count: limit,
+    match_threshold: MATCH_THRESHOLD,
+  });
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as {
+    id: string;
+    topic_id: string;
+    key: string;
+    value: string;
+    pinned: boolean;
+  }[]).map((f) => ({ ...f, similarity: 0 }));
+}
+
+/**
+ * What Nova should know RIGHT NOW, for one intent (normally the user's message).
+ *
+ * Three properties matter more than the ranking itself:
+ *  1. A FLOOR that cannot be missed. Pinned facts and the most recently updated
+ *     ones are always included, so a fact written a minute ago is never invisible
+ *     merely because nothing has asked about it yet.
+ *  2. ONE TOPIC CANNOT FLOOD. Facts are capped per topic after ranking, so a
+ *     kitchen with 40 facts does not crowd out everything else.
+ *  3. IT NEVER GOES BLIND. If embeddings or the RPC are unavailable, the full
+ *     dump is used and `usedFallback` says so. Retrieval is an optimisation, and
+ *     an optimisation must not be a dependency.
+ */
+export async function retrieveMemory(
+  intent: string,
+  opts: { budgetChars?: number; maxFacts?: number; matchLimit?: number } = {}
+): Promise<RetrievedMemory> {
+  const budget = opts.budgetChars ?? MEMORY_BUDGET_CHARS;
+  const maxFacts = opts.maxFacts ?? 30;
+  try {
+    const [matched, recent, topics] = await Promise.all([
+      intent.trim() ? matchFacts(intent, opts.matchLimit ?? 40) : Promise.resolve([]),
+      getActiveFacts(), // pinned first, then most recently updated
+      getTopics(),
+    ]);
+
+    const titleOf = new Map(topics.map((t) => [t.id, t.title]));
+    const summaryOf = new Map(topics.map((t) => [t.id, t.summary]));
+
+    const floor: RankedFact[] = recent
+      .filter((f) => f.pinned)
+      .concat(recent.slice(0, FLOOR_RECENT))
+      .map((f) => ({
+        id: f.id,
+        topic_id: f.topic_id,
+        key: f.key,
+        value: f.value,
+        pinned: f.pinned,
+        similarity: 0,
+      }));
+
+    const seen = new Set<string>();
+    const ranked: RankedFact[] = [];
+    for (const f of [...floor, ...matched]) {
+      if (seen.has(f.id)) continue;
+      seen.add(f.id);
+      ranked.push(f);
+    }
+
+    const perTopic = new Map<string, number>();
+    const kept: RankedFact[] = [];
+    for (const f of ranked) {
+      const n = perTopic.get(f.topic_id) ?? 0;
+      if (n >= MAX_PER_TOPIC) continue;
+      perTopic.set(f.topic_id, n + 1);
+      kept.push(f);
+      if (kept.length >= maxFacts) break;
+    }
+    if (!kept.length) return { block: "", facts: 0, chars: 0, usedFallback: false };
+
+    const byTopic = new Map<string, RankedFact[]>();
+    for (const f of kept) {
+      const list = byTopic.get(f.topic_id) ?? [];
+      list.push(f);
+      byTopic.set(f.topic_id, list);
+    }
+
+    const chunks: string[] = [];
+    let chars = 0;
+    for (const [topicId, list] of byTopic) {
+      const title = titleOf.get(topicId) ?? "Other";
+      const summary = summaryOf.get(topicId);
+      const chunk = [
+        summary ? `### ${title} — ${summary}` : `### ${title}`,
+        ...list.map((f) => `- ${f.key}: ${f.value}${f.pinned ? " [pinned]" : ""}`),
+      ].join("\n");
+      // Always keep at least one topic, even if it alone exceeds the budget: an
+      // empty memory block is worse than a long one.
+      if (chars + chunk.length > budget && chunks.length) break;
+      chunks.push(chunk);
+      chars += chunk.length;
+    }
+    if (!chunks.length) return { block: "", facts: 0, chars: 0, usedFallback: false };
+
+    const block = `## What Nova knows about the user (retrieved for this moment)\n\n${chunks.join("\n\n")}`;
+    return { block, facts: kept.length, chars: block.length, usedFallback: false };
+  } catch {
+    const block = await formatForContext().catch(() => "");
+    return { block, facts: 0, chars: block.length, usedFallback: block.length > 0 };
+  }
+}
+
+// --- backfill ---------------------------------------------------------------
+
+/**
+ * Give every active fact an embedding. Idempotent and batched (one request per
+ * batch, not per fact); safe to re-run after any interruption, because it only
+ * ever reads facts that have no embedding yet. Facts written from now on are
+ * embedded at write time — this is for the ones that already existed.
+ */
+export async function backfillFactEmbeddings(
+  opts: { batch?: number; dryRun?: boolean } = {}
+): Promise<{ embedded: number; failed: number; remaining: number }> {
+  const batch = Math.max(1, Math.min(64, opts.batch ?? 32));
+  const db = createServiceClient();
+
+  const missing = async (): Promise<number> => {
+    const { count } = await db
+      .from("memory_facts")
+      .select("id", { count: "exact", head: true })
+      .eq("status", "active")
+      .is("embedding", null);
+    return count ?? 0;
+  };
+
+  if (opts.dryRun) {
+    return { embedded: 0, failed: 0, remaining: await missing() };
+  }
+
+  const topics = await getTopics();
+  const titleOf = new Map(topics.map((t) => [t.id, t.title]));
+
+  let embedded = 0;
+  let failed = 0;
+  for (;;) {
+    const { data, error } = await db
+      .from("memory_facts")
+      .select("id,topic_id,key,value")
+      .eq("status", "active")
+      .is("embedding", null)
+      .limit(batch);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as {
+      id: string;
+      topic_id: string;
+      key: string;
+      value: string;
+    }[];
+    if (!rows.length) break;
+
+    let vectors: (number[] | null)[] = [];
+    try {
+      vectors = await embedMany(
+        rows.map((r) => factText(titleOf.get(r.topic_id) ?? "General", r.key, r.value))
+      );
+    } catch {
+      // One failed batch must not abort the whole backfill: the next loop
+      // iteration re-reads the same rows, so a persistent failure would spin.
+      failed += rows.length;
+      break;
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const vector = vectors[i];
+      if (!vector) {
+        failed++;
+        continue;
+      }
+      const { error: upErr } = await db
+        .from("memory_facts")
+        .update({ embedding: vector })
+        .eq("id", rows[i].id);
+      if (upErr) failed++;
+      else embedded++;
+    }
+  }
+
+  return { embedded, failed, remaining: await missing() };
 }

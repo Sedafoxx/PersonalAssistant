@@ -50,9 +50,13 @@ export async function POST(req: NextRequest) {
 
         // Always feed the live coach context digest (goals, mood, open actions,
         // people, per-goal notes) into the prompt, best-effort.
+        //
+        // The user's own message is the retrieval intent for memory (M1): the
+        // facts that reach the prompt are the ones relevant to what they just
+        // asked, instead of every fact Nova happens to hold.
         let userContext: string | undefined;
         try {
-          userContext = await buildCoachContext();
+          userContext = await buildCoachContext({ intent: userText });
         } catch {
           userContext = undefined; // coach tables may not exist yet
         }
