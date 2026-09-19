@@ -5,7 +5,7 @@ import { getJournalEntries } from "./journal";
 import { getItems, createItem, type Item } from "./db";
 import { getReflection, getReflectionStreak, type ChecklistItem } from "./reflection";
 import { listUpcomingEvents, createEvent } from "./calendar";
-import { getDay, getDayMetrics, listLeftovers } from "./day";
+import { getDay, getDayMetrics, listLeftovers, findDayTaskByTitle } from "./day";
 import { getMilestonesByGoal, type Milestone } from "./milestones";
 import { logicalDay } from "./dates";
 import { formatForContext, upsertFact, curateTopic } from "./memory";
@@ -1110,6 +1110,13 @@ export async function applyPlan(input: ApplyPlanInput): Promise<{ events: number
     }
     if (input.asTodos && b.type !== "break") {
       try {
+        // Applying a plan twice must not create the work twice. On 2026-09-18 the
+        // same block was written to the day twice, which is how three duplicate
+        // pairs of todos ended up in the list. An open todo with the same title
+        // already on that day means this block is done being applied.
+        const already = await findDayTaskByTitle(input.day, b.title);
+        if (already) continue;
+
         // Resolve the block's goal TITLE to an id so the todo is tied to the
         // goal; stays null when the title does not match an active goal.
         const goalId = await resolveGoal(b.goal);

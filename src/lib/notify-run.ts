@@ -7,6 +7,7 @@ import { hasOpenMorningCheckin, getGoalReview } from "./coach";
 import { generateSuggestions } from "./suggestions";
 import { daysUntil } from "./dates";
 import { captureCheck } from "./commitments";
+import { resolveFinishedTodos } from "./day";
 import { listLoops, staleLoops } from "./loops";
 import { latestReview, formatReviewForMorning, type ReviewObservation } from "./review";
 
@@ -51,6 +52,17 @@ export async function runNotificationRun(kind: NotifyKind) {
   };
 
   let sent = 0;
+
+  // 0. Resolution sweep. Finished tasks whose day is over are put away here, at
+  // the start of a run, so the day begins clean even if the app is never opened
+  // on a phone. Best-effort like everything else: a failure leaves the items
+  // visible and the next sweep picks them up.
+  let resolvedTodos = 0;
+  try {
+    resolvedTodos = await resolveFinishedTodos();
+  } catch {
+    // non-fatal
+  }
 
   // 1. Item reminders due now.
   const items = await getItemsDueForNotification();
@@ -251,6 +263,9 @@ export async function runNotificationRun(kind: NotifyKind) {
   return {
     sent,
     items: items.length,
+    // How many finished tasks this run put away. Reported rather than assumed, so
+    // a run that resolved nothing is distinguishable from one that failed.
+    resolvedTodos,
     journalNudge,
     reflectionNudge,
     coachNudge,

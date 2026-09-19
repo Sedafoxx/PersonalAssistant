@@ -21,7 +21,8 @@
     "memory:test": "node --env-file=.env.local --import tsx scripts/memory-test.ts",
     "review:test": "node --env-file=.env.local --import tsx scripts/review-test.ts",
     "brief:test": "node --env-file=.env.local --import tsx scripts/brief-test.ts",
-    "backlog:test": "node --env-file=.env.local --import tsx scripts/backlog-test.ts"
+    "backlog:test": "node --env-file=.env.local --import tsx scripts/backlog-test.ts",
+    "todos:test": "node --env-file=.env.local --import tsx scripts/todo-lifecycle-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

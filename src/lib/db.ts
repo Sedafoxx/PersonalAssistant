@@ -8,7 +8,7 @@ export type SortBy = "priority" | "created_at" | "due_date";
 
 // Columns to return — excludes `embedding` to keep payloads small.
 const ITEM_COLS =
-  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,planned_for,planned_time,day_order,required,goal_id,milestone_id,created_at,updated_at";
+  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,planned_for,planned_time,day_order,required,goal_id,milestone_id,resolved_at,created_at,updated_at";
 
 // Drop embedding from rows returned by the match_items RPC (returns setof items).
 function stripEmbedding(row: Record<string, unknown>): Item {
@@ -34,6 +34,13 @@ export interface Item {
   required: boolean;
   goal_id: string | null;
   milestone_id: string | null;
+  /**
+   * When a finished task was put away (migration 0025). NULL means live for
+   * planning; a timestamp means the day is over and the element is resolved.
+   * status stays 'done' and planned_for stays on purpose — they are the history
+   * keys the Stats tab, the day metrics and the milestone roll-up read.
+   */
+  resolved_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +87,10 @@ export interface GetItemsOpts {
   planned_for?: string;
   // true → only planned items; false → only unplanned (planned_for is null).
   has_plan?: boolean;
+  // true → exclude items that have been RESOLVED (migration 0025). Resolution is
+  // "finished and its day is over", so this is what keeps finished work out of
+  // the list without hiding it on the day it was actually done.
+  unresolved?: boolean;
 }
 
 export async function getItems(opts: GetItemsOpts = {}): Promise<Item[]> {
@@ -145,6 +156,7 @@ export async function getItems(opts: GetItemsOpts = {}): Promise<Item[]> {
   if (opts.planned_for) q = q.eq("planned_for", opts.planned_for);
   if (opts.has_plan === false) q = q.is("planned_for", null);
   else if (opts.has_plan === true) q = q.not("planned_for", "is", null);
+  if (opts.unresolved) q = q.is("resolved_at", null);
 
   const sortCol = opts.sort_by ?? "created_at";
   q = q.order(sortCol, { ascending: sortCol === "priority" });

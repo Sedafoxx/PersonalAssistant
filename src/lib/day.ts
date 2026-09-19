@@ -32,7 +32,7 @@ export interface DayView {
 }
 
 const TODO_COLS =
-  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,planned_for,planned_time,day_order,required,goal_id,milestone_id,created_at,updated_at";
+  "id,type,title,content,priority,status,tags,due_date,notification_time,xp_awarded,planned_for,planned_time,day_order,required,goal_id,milestone_id,resolved_at,created_at,updated_at";
 
 // Supabase builders are PromiseLike (not Promise) — never call .catch() on one;
 // await inside a try/catch instead.
@@ -77,11 +77,81 @@ function sortToday(items: Item[]): Item[] {
   return [...open, ...done];
 }
 
+// --- resolution --------------------------------------------------------------
+//
+// A finished task is NOT resolved the moment it is ticked. The day it belongs to
+// is still running, and the crossed-out row is the record of what the user did
+// today — that is the point of the Today view. It resolves when its day is over,
+// and that is what puts it out of the Todo list and out of the day.
+//
+// Resolution deliberately does not touch status or planned_for: those are the
+// history keys the Stats tab (getTaskTrend), the day metrics (getDayMetrics) and
+// the milestone roll-up (syncMilestoneFromTasks) read. Hiding is resolved_at's
+// job alone, which is also what makes it reversible — set it back to null and the
+// task is live again.
+//
+// Which day does a finished task belong to? The day it was planned for if it was
+// planned, otherwise the day it was completed. A task planned for a FUTURE day
+// that was already ticked stays live: its day has not happened yet.
+export function finishedDay(row: {
+  planned_for: string | null;
+  updated_at: string;
+}): string {
+  return row.planned_for ?? logicalDay(new Date(row.updated_at));
+}
+
+/**
+ * Put every finished task whose day is over out of view. Returns how many were
+ * resolved (0 when there was nothing to do, which is the normal case).
+ *
+ * Best-effort by design: a failed sweep leaves an item visible, and the next
+ * sweep — or the next morning run — picks it up. It must never cost the user his
+ * day view.
+ */
+export async function resolveFinishedTodos(day?: string): Promise<number> {
+  const today = isDayString(day) ? day : localDay();
+  const db = createServiceClient();
+  try {
+    const { data, error } = await db
+      .from("items")
+      .select("id,planned_for,updated_at")
+      .eq("type", "todo")
+      .eq("status", "done")
+      .is("resolved_at", null);
+    if (error) throw new Error(error.message);
+
+    const finished = (
+      (data ?? []) as { id: string; planned_for: string | null; updated_at: string }[]
+    ).filter((row) => finishedDay(row) < today);
+    if (finished.length === 0) return 0;
+
+    const stamp = new Date().toISOString();
+    for (const row of finished) {
+      const { error: upErr } = await db
+        .from("items")
+        .update({ resolved_at: stamp })
+        .eq("id", row.id);
+      if (upErr) throw new Error(upErr.message);
+    }
+    return finished.length;
+  } catch {
+    return 0;
+  }
+}
+
 export async function getDay(day?: string): Promise<DayView> {
   const date = isDayString(day) ? day : localDay();
+
+  // Opening the day is the natural moment to put yesterday's finished work away.
+  await resolveFinishedTodos();
+
   const all = await fetchTodos();
 
-  const todayAll = all.filter((i) => i.planned_for === date);
+  // A resolved item no longer occupies its day. It keeps its planned_for, it just
+  // stops being planned.
+  const todayAll = all.filter(
+    (i) => i.planned_for === date && i.resolved_at == null
+  );
   const inToday = new Set(todayAll.map((i) => i.id));
   const today = sortToday(todayAll);
 
@@ -149,8 +219,50 @@ export interface AddDayTaskInput {
   planned_for?: string;
 }
 
+// Title comparison that ignores case, punctuation and spacing, so
+// "Morning Workout (Arm-Routine)" and "morning workout  ( arm-routine )" are
+// recognised as the same task.
+function titleKey(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9\u00c0-\u024f]+/g, " ")
+    .trim();
+}
+
+/**
+ * An OPEN todo already planned for this day under the same title, if there is
+ * one. The assistant plans a turn at a time and can propose a title it already
+ * scheduled a minute earlier: on 2026-09-18 that produced three duplicate pairs
+ * ("Santi treffen", "Essen mitnehmen in die Arbeit", "Morning Workout").
+ */
+export async function findDayTaskByTitle(
+  day: string,
+  title: string
+): Promise<Item | null> {
+  const db = createServiceClient();
+  try {
+    const { data, error } = await db
+      .from("items")
+      .select(TODO_COLS)
+      .eq("type", "todo")
+      .eq("status", "active")
+      .eq("planned_for", day);
+    if (error) throw new Error(error.message);
+    const key = titleKey(title);
+    return ((data ?? []) as Item[]).find((i) => titleKey(i.title) === key) ?? null;
+  } catch {
+    return null; // a failed lookup must never block creating the task
+  }
+}
+
 export async function addDayTask(input: AddDayTaskInput): Promise<Item> {
   const day = isDayString(input.planned_for) ? input.planned_for : localDay();
+
+  // Never a second copy of the same task on the same day: the existing row is
+  // returned instead, so a re-plan is idempotent rather than duplicating work.
+  const existing = await findDayTaskByTitle(day, input.title);
+  if (existing) return existing;
+
   const dayOrder = (await maxDayOrder(day)) + 1;
 
   // A real todo — the same row the user sees in the todo list.
