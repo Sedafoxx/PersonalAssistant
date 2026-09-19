@@ -110,6 +110,28 @@ const ITEM_COLS =
  * paging stays a straight slice and can never skip or repeat an item.
  */
 function interleaveKinds(items: RankedItem[], maxRun = 2): RankedItem[] {
+  // Mix WITHIN a score band, never across one: relevance is the promise, so a
+  // 5/5 item is never demoted behind a 4/5 one to improve the look.
+  //
+  // Doing it per band is what actually fixes the skew. Ties inside a band are
+  // broken by recency, so without this the newest batch of a single kind won every
+  // tie and the first live page read as eight podcasts out of twelve.
+  const bands = new Map<number, RankedItem[]>();
+  for (const item of items) {
+    const band = bands.get(item.score) ?? [];
+    band.push(item);
+    bands.set(item.score, band);
+  }
+
+  const out: RankedItem[] = [];
+  for (const score of [...bands.keys()].sort((a, b) => b - a)) {
+    out.push(...roundRobinKinds(bands.get(score) ?? [], maxRun));
+  }
+  return out;
+}
+
+/** At most `maxRun` of a kind in a row, then the best item of another kind. */
+function roundRobinKinds(items: RankedItem[], maxRun: number): RankedItem[] {
   const out: RankedItem[] = [];
   const rest = [...items];
   while (rest.length) {
@@ -2504,12 +2526,18 @@ export async function backfillFeedDescriptions(): Promise<{
     }
   }
 
-  const nonSpotify = rows.filter((r) => !spotifyEpisodeId(r.url)).length;
+  // The Apple-era rows are deliberately NOT chased here. An iTunes lookup by the id
+  // in the link was written and tried, and it filled nothing — a probe returns
+  // status 200 with zero results, so the id/endpoint pairing is unproven rather than
+  // broken-and-understood. Leaving a function that silently fills nothing would be
+  // worse than leaving these rows alone: they are legacy (Spotify is the source now)
+  // and they fall out of the pool as newer episodes arrive.
+  const appleRows = rows.filter((r) => !spotifyEpisodeId(r.url)).length;
   return {
     checked: rows.length,
     updated,
     detail:
-      `${rows.length} podcast row(s) had no text; ${updated} filled in by Spotify ` +
-      `search; ${nonSpotify} left alone (Apple links)`,
+      `${rows.length} podcast row(s) had no text; ${updated} filled from Spotify ` +
+      `search; ${appleRows} Apple-era row(s) left alone (no working lookup)`,
   };
 }

@@ -385,6 +385,13 @@ export function spotifyEpisodeId(url: string): string | null {
   return m ? m[1] : null;
 }
 
+// There is deliberately no Apple-episode lookup here. One was written
+// (`/lookup?id=<episode id>&entity=podcastEpisode`) and it filled nothing for the 42
+// stored Apple rows: a probe answers status 200 with zero results, so the
+// id/endpoint pairing is unproven rather than understood. A function that silently
+// fills nothing is worse than no function, and those rows are legacy — Spotify is the
+// podcast source now, and they leave the pool as newer episodes arrive.
+
 /**
  * Descriptions for episodes the feed ALREADY stored, found by SEARCH.
  *
