@@ -11,9 +11,60 @@ import { embed, embedMany } from "./embeddings";
 
 const TOPIC_COLS = "id,slug,title,summary,summary_updated_at,updated_at";
 const FACT_COLS =
-  "id,topic_id,key,value,status,pinned,source,superseded_by,created_at,updated_at";
+  "id,topic_id,key,value,status,kind,pinned,source,source_ref,confidence,verify_after,verified_at,superseded_by,created_at,updated_at";
 
 export type FactStatus = "active" | "superseded" | "pending_removal";
+
+/**
+ * WHAT KIND OF TRUTH A FACT IS. Without this, "tofu: none left" and "career goal:
+ * move toward leadership" were the same row with the same lifetime, so the
+ * volatile one went stale silently and contradicted newer facts.
+ *   durable — true for weeks: preferences, people, patterns, goals
+ *   state   — true until reality moves: pantry, current reading, where he is
+ *   derived — a conclusion Nova drew itself, not something the user said
+ */
+export type FactKind = "durable" | "state" | "derived";
+
+/** Topics whose facts rot fast, so a state fact in them ages sooner. */
+const VOLATILE_TOPIC_HINTS = [
+  "küche",
+  "kueche",
+  "vorrat",
+  "vorräte",
+  "vorraete",
+  "kochen",
+  "einkauf",
+  "pantry",
+  "kitchen",
+  "fridge",
+  "stock",
+];
+const STATE_VERIFY_DAYS = 7;
+const VOLATILE_VERIFY_DAYS = 3;
+
+/**
+ * When a fact should be re-checked, or null when it never needs to be. Only
+ * `state` facts age: a preference is not made false by the passage of time.
+ */
+export function defaultVerifyAfter(
+  topicTitle: string,
+  kind: FactKind,
+  from: Date = new Date()
+): string | null {
+  if (kind !== "state") return null;
+  const lower = topicTitle.toLowerCase();
+  const days = VOLATILE_TOPIC_HINTS.some((h) => lower.includes(h))
+    ? VOLATILE_VERIFY_DAYS
+    : STATE_VERIFY_DAYS;
+  return new Date(from.getTime() + days * 864e5).toISOString();
+}
+
+/** True when a fact is past its verify date — label it, never delete it. */
+export function isStale(fact: { verify_after?: string | null }, now = Date.now()): boolean {
+  if (!fact.verify_after) return false;
+  const t = Date.parse(fact.verify_after);
+  return !Number.isNaN(t) && t < now;
+}
 
 export interface MemoryTopic {
   id: string;
@@ -30,8 +81,13 @@ export interface MemoryFact {
   key: string;
   value: string;
   status: FactStatus;
+  kind: FactKind;
   pinned: boolean;
   source: string | null;
+  source_ref: string | null;
+  confidence: number;
+  verify_after: string | null;
+  verified_at: string | null;
   superseded_by: string | null;
   created_at: string;
   updated_at: string;
@@ -176,6 +232,12 @@ export interface UpsertFactInput {
   key: string;
   value: string;
   source?: string;
+  /** Where it came from: a chat message, journal row or script. */
+  source_ref?: string | null;
+  /** Defaults to `durable`; `state` facts also get a verify_after date. */
+  kind?: FactKind;
+  confidence?: number;
+  verify_after?: string | null;
   pinned?: boolean;
   /**
    * Pre-computed embedding. Callers that write several facts at once (a chat
@@ -268,6 +330,14 @@ export async function upsertFact(
   const embedding =
     input.embedding ?? (await safeEmbed(factText(topic.title, key, value)));
 
+  // M2: the semantics. A `state` fact gets a re-check date so it can age; a
+  // `durable` fact never does.
+  const kind: FactKind = input.kind ?? "durable";
+  const verifyAfter =
+    input.verify_after !== undefined
+      ? input.verify_after
+      : defaultVerifyAfter(topic.title, kind);
+
   // 3 & 5. Insert the new active row.
   const { data: created, error: insErr } = await db
     .from("memory_facts")
@@ -276,8 +346,13 @@ export async function upsertFact(
       key,
       value,
       status: "active",
+      kind,
       pinned: input.pinned ?? false,
       source: input.source ?? null,
+      source_ref: input.source_ref ?? null,
+      confidence: input.confidence ?? 0.7,
+      verify_after: verifyAfter,
+      verified_at: new Date().toISOString(),
       embedding,
     })
     .select(FACT_COLS)
@@ -494,8 +569,34 @@ interface RankedFact {
   topic_id: string;
   key: string;
   value: string;
+  kind?: FactKind;
   pinned: boolean;
+  verify_after?: string | null;
   similarity: number;
+}
+
+/**
+ * Active facts that are past their verify date — the pantry fact that still says
+ * "none left" three weeks later. They are NOT removed: the prompt labels them and
+ * the brief offers to re-confirm, because a fact the coach knows is shaky beats a
+ * fact that quietly disappeared.
+ */
+export async function staleFacts(limit = 20): Promise<MemoryFact[]> {
+  try {
+    const db = createServiceClient();
+    const { data, error } = await db
+      .from("memory_facts")
+      .select(FACT_COLS)
+      .eq("status", "active")
+      .not("verify_after", "is", null)
+      .lt("verify_after", new Date().toISOString())
+      .order("verify_after", { ascending: true })
+      .limit(limit);
+    if (error) throw new Error(error.message);
+    return (data ?? []) as MemoryFact[];
+  } catch {
+    return [];
+  }
 }
 
 /** The embedding search itself. Throws — retrieveMemory decides what to do. */
@@ -513,7 +614,9 @@ async function matchFacts(intent: string, limit: number): Promise<RankedFact[]> 
     topic_id: string;
     key: string;
     value: string;
+    kind: FactKind;
     pinned: boolean;
+    verify_after: string | null;
   }[]).map((f) => ({ ...f, similarity: 0 }));
 }
 
@@ -554,7 +657,9 @@ export async function retrieveMemory(
         topic_id: f.topic_id,
         key: f.key,
         value: f.value,
+        kind: f.kind,
         pinned: f.pinned,
+        verify_after: f.verify_after,
         similarity: 0,
       }));
 
@@ -591,7 +696,14 @@ export async function retrieveMemory(
       const summary = summaryOf.get(topicId);
       const chunk = [
         summary ? `### ${title} — ${summary}` : `### ${title}`,
-        ...list.map((f) => `- ${f.key}: ${f.value}${f.pinned ? " [pinned]" : ""}`),
+        ...list.map(
+          (f) =>
+            `- ${f.key}: ${f.value}${f.pinned ? " [pinned]" : ""}` +
+            // A state fact past its verify date is LABELLED, not hidden: the
+            // coach is told to ask instead of asserting. This is what stops
+            // "tofu: none left" from being stated as fact three weeks later.
+            (isStale(f) ? " [may be stale — ask, do not assert]" : "")
+        ),
       ].join("\n");
       // Always keep at least one topic, even if it alone exceeds the budget: an
       // empty memory block is worse than a long one.

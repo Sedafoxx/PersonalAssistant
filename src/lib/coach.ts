@@ -8,7 +8,14 @@ import { listUpcomingEvents, createEvent } from "./calendar";
 import { getDay, getDayMetrics, listLeftovers, findDayTaskByTitle } from "./day";
 import { getMilestonesByGoal, type Milestone } from "./milestones";
 import { logicalDay } from "./dates";
-import { retrieveMemory, upsertFact, curateTopic, factText } from "./memory";
+import {
+  retrieveMemory,
+  upsertFact,
+  curateTopic,
+  factText,
+  type MemoryFact,
+  type FactKind,
+} from "./memory";
 import { embedMany } from "./embeddings";
 import { listLoops, staleLoops } from "./loops";
 import { listCommitments } from "./commitments";
@@ -484,27 +491,34 @@ export async function addCoachMemory(
   return (data as CoachMemory) ?? null;
 }
 
-// Extract durable memories from a conversation turn (best-effort, non-fatal).
-const MEMORY_SYSTEM = `You extract DURABLE, personal memories worth keeping about a specific user from a coaching exchange. Keep only what stays useful weeks later: facts about their life, people, preferences, decisions, wins, recurring patterns, or goal context. Ignore small talk, one-off logistics, and anything mundane.
+// Extract durable memory from a conversation turn (best-effort, non-fatal).
+//
+// M2: this writes FACTS ONLY. It used to also append free-text notes to a second
+// store that had no update path — which is how 552 prose sentences accumulated
+// alongside 270 correctable facts, saying overlapping things in different
+// versions. One notebook means one write path.
+const MEMORY_SYSTEM = `You maintain the LONG-TERM MEMORY of a personal assistant from ONE coaching exchange. You write (topic, key, value) FACTS, and nothing else.
 
-You ALSO maintain a small structured store of LIVING FACTS, each a (topic, key, value) triple: the topic is a broad area of their life ("Küche & Vorräte", "Ausstattung", "Vorlieben", "Ziele"), the key is the stable thing being talked about, short and generic ("tofu", "diet", "tv"), and the value is its CURRENT state ("in stock", "none left", "vegan").
+- topic: a broad area of the user's life in THEIR language ("Küche & Vorräte", "Ziele", "Arbeit", "Beziehung"). Reuse an existing topic when one fits.
+- key: the stable thing being talked about, short and generic ("tofu", "diet", "salary_target"). A key is a SLOT THAT IS UPDATED, never accumulated.
+- value: its CURRENT state, present tense, stated plainly.
+- kind: "durable" (true for weeks: preferences, people, patterns, goals), "state" (reality will move it: pantry, what they are reading, where they are), "derived" (an insight you are concluding, not something they said).
 
-Rules for facts — these matter:
-- A key is a SLOT THAT IS UPDATED, never accumulated. Re-using an existing key with a new value is exactly how the store stays current.
-- NEVER express a removal. The opposite of a fact is a new VALUE for the same key: "ich habe keinen Tofu mehr" is key "tofu" with value "none left" — not a deletion.
-- Emit a fact only when the exchange genuinely states the value. Do not infer, and do not restate an unchanged value.
+Rules — these matter:
+- Re-use an existing key with a new value instead of inventing a near-duplicate: that is exactly how the store stays current.
+- NEVER express a removal. "ich habe keinen Tofu mehr" is key "tofu" with value "none left" — not a deletion.
+- Emit a fact ONLY when the exchange genuinely states it. Never infer, and never restate a value that has not changed.
+- Keep the user's language for values they wrote in German.
 
 Return ONLY JSON:
-{"memories":[{"text":"...","kind":"fact|person|preference|decision|win|pattern|goal_note","category":"short topic or null"}],
- "facts":[{"topic":"...","key":"...","value":"..."}]}
-- 0-3 memories. Empty array if nothing durable was said.
-- 0-6 facts, and an empty array when nothing concrete was stated.
-- Each "text" is a compact self-contained sentence starting with "User ...".`;
+{"facts":[{"topic":"...","key":"...","value":"...","kind":"durable|state|derived"}]}
+- 0-6 facts. An empty array is the correct answer for small talk or pure logistics.`;
 
 export async function extractMemories(
   userText: string,
-  assistantText: string
-): Promise<CoachMemory[]> {
+  assistantText: string,
+  opts: { sourceRef?: string | null } = {}
+): Promise<MemoryFact[]> {
   const exchange = `User: ${userText}\n\nCoach: ${assistantText}`.slice(0, 4000);
   const res = await llm().chat.completions.create({
     model: MODEL,
@@ -516,44 +530,27 @@ export async function extractMemories(
   });
   const raw = (res.choices[0].message.content ?? "").trim();
   let parsed: {
-    memories?: { text?: string; kind?: string; category?: string | null }[];
-    facts?: { topic?: string; key?: string; value?: string }[];
+    facts?: { topic?: string; key?: string; value?: string; kind?: string }[];
   };
   try {
     parsed = JSON.parse(raw);
   } catch {
     return [];
   }
-  const KINDS: MemoryKind[] = ["fact", "person", "preference", "decision", "win", "pattern", "goal_note"];
-  const saved: CoachMemory[] = [];
-  for (const m of (parsed.memories ?? []).slice(0, 3)) {
-    const text = (m.text ?? "").trim();
-    if (!text) continue;
-    const kind = KINDS.includes(m.kind as MemoryKind) ? (m.kind as MemoryKind) : "fact";
-    try {
-      const row = await addCoachMemory(text, kind, {
-        category: m.category ?? null,
-        source: "chat",
-      });
-      if (row) saved.push(row);
-    } catch {
-      // non-fatal
-    }
-  }
 
-  // Living memory: merge the structured (topic, key, value) facts. upsertFact
-  // supersedes an existing key instead of adding a contradicting row, and it can
-  // never delete — a "removed" thing is just a new value.
-  //
-  // Curation is bounded to the topics that ACTUALLY changed, and to at most 2
-  // per turn, because rewriting a topic summary costs a model call each.
+  // Merge (topic, key, value) facts. upsertFact supersedes an existing key rather
+  // than adding a contradicting row, and it can never delete — a "removed" thing
+  // is just a new value. Curation is bounded to the topics that ACTUALLY changed,
+  // and to at most 2 per turn, because rewriting a summary costs a model call.
   const changedTopics = new Set<string>();
+  const KINDS: FactKind[] = ["durable", "state", "derived"];
   const candidates = (parsed.facts ?? [])
     .slice(0, 6)
     .map((f) => ({
       topic: (f.topic ?? "").trim(),
       key: (f.key ?? "").trim(),
       value: (f.value ?? "").trim(),
+      kind: (KINDS.includes(f.kind as FactKind) ? f.kind : "durable") as FactKind,
     }))
     .filter((f) => f.topic.length > 0 && f.key.length > 0 && f.value.length > 0);
 
@@ -568,6 +565,7 @@ export async function extractMemories(
     vectors = [];
   }
 
+  const written: MemoryFact[] = [];
   for (let i = 0; i < candidates.length; i++) {
     const f = candidates[i];
     try {
@@ -575,9 +573,14 @@ export async function extractMemories(
         topic: f.topic,
         key: f.key,
         value: f.value,
+        kind: f.kind,
         source: "chat",
+        // Provenance: the id of the user message this came from, so "nothing
+        // lost" can be audited back to the sentence that produced it.
+        source_ref: opts.sourceRef ?? null,
         embedding: vectors[i] ?? undefined,
       });
+      if (result.fact) written.push(result.fact);
       if (result.changed && result.fact) changedTopics.add(result.fact.topic_id);
     } catch {
       // non-fatal
@@ -594,7 +597,7 @@ export async function extractMemories(
     }
   }
 
-  return saved;
+  return written;
 }
 
 // --- habit tracking + daily wins summary -----------------------------------

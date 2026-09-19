@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
         // Log this turn (newest user message + assistant reply) for memory and
         // the suggestion engine. Strip the choice-button marker from storage.
         const reply = text.split("[[CHOICES]]")[0].trim();
-        await logChatMessages(
+        const messageIds = await logChatMessages(
           [
             ...(userText ? [{ role: "user" as const, content: userText }] : []),
             ...(reply ? [{ role: "assistant" as const, content: reply }] : []),
@@ -77,11 +77,13 @@ export async function POST(req: NextRequest) {
           client_id ? String(client_id) : undefined
         );
 
-        // Extract durable long-term memories from the exchange so the assistant
-        // remembers what was discussed (best-effort).
+        // Extract durable memory from the exchange so the assistant remembers what
+        // was discussed (best-effort). The user message's row id is passed as
+        // provenance, so a fact can be traced back to the sentence that produced it
+        // rather than being an unattributed assertion.
         if (userText && reply) {
           try {
-            await extractMemories(userText, reply);
+            await extractMemories(userText, reply, { sourceRef: messageIds[0] ?? null });
           } catch {
             // non-fatal
           }

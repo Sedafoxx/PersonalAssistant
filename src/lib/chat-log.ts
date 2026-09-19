@@ -5,19 +5,28 @@ import { createServiceClient } from "./supabase";
 // reach for), and so the assistant can remember a conversation across requests
 // (per-client_id history). Best-effort — never let a logging error break the
 // chat reply.
+/**
+ * Persist chat turns.
+ *
+ * Returns the ids of the rows it wrote, in order, so a memory extracted from a
+ * turn can point back at the exact exchange it came from (M2 provenance). An
+ * empty array means nothing was written — a logging failure is never fatal.
+ */
 export async function logChatMessages(
   msgs: { role: "user" | "assistant"; content: string }[],
   clientId?: string
-): Promise<void> {
+): Promise<string[]> {
   const rows = msgs
     .map((m) => ({ role: m.role, content: m.content.trim(), client_id: clientId ?? null }))
     .filter((m) => m.content.length > 0);
-  if (rows.length === 0) return;
+  if (rows.length === 0) return [];
   try {
     const db = createServiceClient();
-    await db.from("chat_messages").insert(rows);
+    const { data, error } = await db.from("chat_messages").insert(rows).select("id");
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as { id: string }[]).map((r) => r.id);
   } catch {
-    // swallow — logging is non-essential
+    return [];
   }
 }
 

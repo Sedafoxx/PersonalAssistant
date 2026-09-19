@@ -24,7 +24,9 @@
     "backlog:test": "node --env-file=.env.local --import tsx scripts/backlog-test.ts",
     "todos:test": "node --env-file=.env.local --import tsx scripts/todo-lifecycle-test.ts",
     "memory:backfill": "node --env-file=.env.local --import tsx scripts/memory-backfill.ts",
-    "memory:retrieval:test": "node --env-file=.env.local --import tsx scripts/memory-retrieval-test.ts"
+    "memory:retrieval:test": "node --env-file=.env.local --import tsx scripts/memory-retrieval-test.ts",
+    "memory:consolidate": "node --env-file=.env.local --import tsx scripts/memory-consolidate.ts",
+    "memory:oneshop:test": "node --env-file=.env.local --import tsx scripts/memory-oneshop-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",
