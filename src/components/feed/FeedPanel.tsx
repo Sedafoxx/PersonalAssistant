@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { SmartLink } from "@/components/SmartLink";
 
 // The Feed tab (P4): the day's ranked shortlist, and nothing else.
 //
@@ -366,14 +367,14 @@ export function FeedPanel() {
                       {chipLabel(item)}
                     </span>
                   </div>
-                  <a
+                  {/* Opens in the YouTube/Spotify APP on Android, in the browser
+                      everywhere else — see SmartLink. */}
+                  <SmartLink
                     href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
                     className="flex-shrink-0 h-9 px-3 flex items-center rounded-lg bg-white/5 text-gray-300 text-xs font-medium hover:bg-white/10 transition-colors"
                   >
                     Open
-                  </a>
+                  </SmartLink>
                 </li>
               ))}
             </ul>
@@ -448,14 +449,12 @@ function FeedCard({
 
   return (
     <div className="bg-[#1a1a1a] border border-white/10 rounded-xl p-3.5">
-      <a
+      <SmartLink
         href={item.url}
-        target="_blank"
-        rel="noopener noreferrer"
         className="block text-sm font-medium text-gray-100 leading-snug hover:text-indigo-300 transition-colors"
       >
         {item.title}
-      </a>
+      </SmartLink>
 
       <div className="flex items-center gap-1.5 mt-2 flex-wrap">
         <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 text-gray-300">

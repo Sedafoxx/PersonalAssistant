@@ -1,4 +1,5 @@
 import { Fragment, type ReactNode } from "react";
+import { SmartLink } from "@/components/SmartLink";
 
 // Matches http(s) URLs and bare www. links.
 const URL_RE = /\b((?:https?:\/\/|www\.)[^\s<]+[^\s<.,:;!?)\]}'"])/gi;
@@ -17,15 +18,14 @@ export function linkify(text: string): ReactNode[] {
     const raw = m[0];
     const href = raw.startsWith("http") ? raw : `https://${raw}`;
     out.push(
-      <a
+      // A YouTube or Spotify link in a note opens in its own app on Android.
+      <SmartLink
         key={key++}
         href={href}
-        target="_blank"
-        rel="noopener noreferrer"
         className="text-indigo-400 underline underline-offset-2 hover:text-indigo-300 break-all"
       >
         {raw}
-      </a>
+      </SmartLink>
     );
     last = m.index + raw.length;
   }
