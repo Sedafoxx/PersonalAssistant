@@ -507,6 +507,7 @@ Rules — these matter:
 - KITCHEN, SUPPLIES, STOCK, AND WHAT WAS COOKED ARE ALWAYS kind "state" — never "durable", however settled they sound. "Verräte aktuell", "Gekochtes heute" and "Fehlende Gewürze" are snapshots. (Measured reason, 2026-09-20: a five-day-old pantry snapshot stored as durable got no verify date, so it was read back as today's kitchen — and the assistant told a vegan he had no garlic and proposed chicken.)
 - A CONSTRAINT IS PINNED. Diet, allergies, medical limits and "I never/always X" are not preferences: they filter everything the assistant may suggest. Store those with pinned=true so they can never fall out of its context, key "diet" (or the constraint's own name), kind "durable".
 - Keep the user's language for values they wrote in German.
+- KEEP THE SLOT'S LANGUAGE. If a topic already has a slot for this thing, reuse THAT key exactly as it is stored, even when the other language would be more natural to you: "diet" must not reappear as "ernährung", and "ernährung" must not reappear as "diet". Measured reason (2026-09-20): one vegan constraint lived in this store as five active facts under three keys in two languages, and retrieval can surface any one of them, so the same truth appeared in slightly different words and only some of it was ever in front of the assistant. Never translate a value you are updating either — update it in the language it is already written in.
 
 Return ONLY JSON:
 {"facts":[{"topic":"...","key":"...","value":"...","kind":"durable|state|derived","pinned":false}]}
