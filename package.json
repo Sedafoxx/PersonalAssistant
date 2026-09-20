@@ -31,6 +31,7 @@
     "feed:describe": "node --env-file=.env.local --import tsx scripts/feed-descriptions-backfill.ts",
     "search:test": "node --env-file=.env.local --import tsx scripts/search-rank-test.ts",
     "memory:kitchen": "node --env-file=.env.local --import tsx scripts/memory-fix-kitchen.ts",
+    "map": "node --env-file=.env.local scripts/system-map.mjs",
     "test:fast": "node scripts/test-all.mjs",
     "test:all": "node scripts/test-all.mjs --tier all",
     "test:llm": "node scripts/test-all.mjs --tier llm"

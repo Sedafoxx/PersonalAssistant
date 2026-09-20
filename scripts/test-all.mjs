@@ -22,7 +22,8 @@
 // A test PASSES when its exit code is 0 and its output contains no "FAIL" line.
 // Exit code 1 if anything failed, so this is usable as a gate.
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 /** tier: "cheap" = no model call, "llm" = makes real completions (costs money). */
 const TESTS = [
@@ -123,6 +124,18 @@ for (const t of selected) {
     }
   }
   results.push({ ...t, status, pass, fail, seconds });
+}
+
+// Leave a trace for the system map (plans/system-map.html), so "what exists and
+// does it work" is one page instead of two commands.
+try {
+  mkdirSync(join(process.cwd(), "plans"), { recursive: true });
+  writeFileSync(
+    join(process.cwd(), "plans", "test-status.json"),
+    JSON.stringify(Object.fromEntries(results.map((r) => [r.file, r.status])), null, 2)
+  );
+} catch {
+  // a report file is a convenience, never a reason to fail the run
 }
 
 const ok = results.filter((r) => r.status === "ok").length;

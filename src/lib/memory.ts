@@ -67,15 +67,14 @@ export function isStale(fact: { verify_after?: string | null }, now = Date.now()
 }
 
 /**
- * "5 days ago" for a fact or a summary that was not confirmed today, "" when it
- * was. Pure and exported so it can be checked without a database.
+ * "5 days ago" for a summary heading, "" when it was written today. Pure and
+ * exported so it can be checked without a database.
  *
  * Age is the piece of information whose ABSENCE caused the kitchen failure of
  * 2026-09-20: the pantry facts were five days old and rendered exactly like
  * today's news, so the assistant said "you have no garlic" (and offered chicken
  * to a vegan) with full confidence. The age is SHOWN, not interpreted — the
- * prompt decides whether to use it or to ask. Deliberately not applied to
- * facts from today: an age on everything is noise, and noise gets ignored.
+ * prompt decides whether to use it or to ask.
  */
 export function ageLabel(iso?: string | null, now = Date.now()): string {
   if (!iso) return "";
@@ -84,6 +83,25 @@ export function ageLabel(iso?: string | null, now = Date.now()): string {
   const days = Math.floor((now - t) / 86_400_000);
   if (days < 1) return "";
   return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
+/**
+ * The same age, compact, for a fact line: "5d", "" when confirmed today.
+ *
+ * Two forms on purpose. The long one belongs in a heading, where it is read once
+ *; the short one belongs on every fact, where it is a COST. The first version
+ * used "last confirmed 5 days ago" on each line and moved the whole memory block
+ * ~30 chars per fact over the budget — which silently pushed the oldest topic out
+ * of the window and broke `memory:retrieval:test` check 2 (a fact findable only
+ * by meaning, which is exactly what the budget guards). The test caught it; the
+ * legend for "(5d)" and "[stale]" lives once in the system prompt instead.
+ */
+export function ageDays(iso?: string | null, now = Date.now()): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const days = Math.floor((now - t) / 86_400_000);
+  return days < 1 ? "" : `${days}d`;
 }
 
 export interface MemoryTopic {
@@ -569,6 +587,21 @@ export const MEMORY_BUDGET_CHARS = 2600;
 /** Pinned facts, plus the newest few, are ALWAYS present — see retrieveMemory. */
 const FLOOR_RECENT = 10;
 
+/**
+ * What a floored fact's RECENCY is worth when the block is ordered (0-1, the same
+ * scale as cosine similarity).
+ *
+ * The floor guarantees inclusion but used to win the whole block, which broke
+ * both ways once the store grew: the recent-but-unrelated topics ate the budget
+ * (a fact the search ranked #1 never got in), and once that was fixed by ordering
+ * on similarity alone, the opposite would have happened — a fact written a minute
+ * ago has no similarity to anything, so a flood of weak matches (0.26 and up,
+ * measured) would push it out, and check 3 of memory-retrieval-test exists to
+ * stop exactly that. 0.4 is deliberately between the two: a recent fact counts as
+ * a GOOD match, a strong match (0.5+) still beats it, noise does not.
+ */
+const FLOOR_SIM = 0.4;
+
 /** One topic may not flood the block: at most this many of its facts get in. */
 const MAX_PER_TOPIC = 3;
 
@@ -632,6 +665,12 @@ async function matchFacts(intent: string, limit: number): Promise<RankedFact[]> 
     match_threshold: MATCH_THRESHOLD,
   });
   if (error) throw new Error(error.message);
+  // KEEP the similarity the RPC computed. This used to be flattened to 0 for
+  // every match, which was harmless while the floor sorted first anyway — and
+  // became the actual bug once the block was ordered by similarity: every real
+  // match looked equally worthless, so the floor's recency won the whole budget
+  // and the best match for the intent (0.61, ranked #1 by the search) was cut.
+  // Two rounds of "fixing the ordering" changed nothing until this line was read.
   return ((data ?? []) as {
     id: string;
     topic_id: string;
@@ -641,7 +680,8 @@ async function matchFacts(intent: string, limit: number): Promise<RankedFact[]> 
     pinned: boolean;
     verify_after: string | null;
     updated_at: string | null;
-  }[]).map((f) => ({ ...f, similarity: 0 }));
+    similarity: number;
+  }[]).map((f) => ({ ...f, similarity: Number(f.similarity) || 0 }));
 }
 
 /**
@@ -688,16 +728,35 @@ export async function retrieveMemory(
         pinned: f.pinned,
         verify_after: f.verify_after,
         updated_at: f.updated_at,
-        similarity: 0,
+        // Recency is worth FLOOR_SIM in the ordering, not 0 and not everything.
+        similarity: FLOOR_SIM,
       }));
 
-    const seen = new Set<string>();
-    const ranked: RankedFact[] = [];
-    for (const f of [...floor, ...matched]) {
-      if (seen.has(f.id)) continue;
-      seen.add(f.id);
-      ranked.push(f);
+    // Dedupe (a floor entry may also be a match — the floor copy carries pinned),
+    // then ORDER. This used to keep the floor in front wholesale, and because the
+    // budget is spent in THIS order that turned out to be a real bug once the
+    // store grew: with 649 facts the floor's recent-but-unrelated topics filled
+    // all 2600 chars, and a fact the embedding search ranked NUMBER ONE (0.61
+    // similarity, the pinecone-flour probe) never got a slot in the block. So the
+    // floor is a guarantee of INCLUSION, not of priority:
+    //   1. pinned — a hard constraint must never lose its place;
+    //   2. strongest semantic match for this intent;
+    //   3. the rest of the floor as recency filler (similarity 0, therefore last).
+    // Array.sort is stable, so equal similarities keep their order: the floor's
+    // newest-first sequence, then the RPC's similarity ranking.
+    // Dedupe by id, keeping the strongest similarity of the two copies: a floored
+    // fact that the search ALSO ranked highly must keep its real score, or the
+    // floor's 0.4 would demote it below weaker matches.
+    const byId = new Map<string, RankedFact>();
+    for (const f of floor) byId.set(f.id, { ...f });
+    for (const f of matched) {
+      const prev = byId.get(f.id);
+      if (prev) prev.similarity = Math.max(prev.similarity, f.similarity);
+      else byId.set(f.id, f);
     }
+    const ranked = [...byId.values()].sort(
+      (a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0) || b.similarity - a.similarity
+    );
 
     const perTopic = new Map<string, number>();
     const kept: RankedFact[] = [];
@@ -731,19 +790,17 @@ export async function retrieveMemory(
           ? `### ${title}${summaryAge ? ` (summary written ${summaryAge})` : ""} — ${summary}`
           : `### ${title}`,
         ...list.map((f) => {
-          // LABEL, never hide, and say which label means what: a fact past its
-          // verify date is DECLARED shaky ("ask, do not assert"), while a fact
-          // that simply is not from today is shown with its age so the model can
-          // decide for itself. Both exist because a pantry note is not a lie —
-          // it is news with an expiry.
-          const age = ageLabel(f.updated_at);
+          // LABEL, never hide. Two markers, and the difference matters: [stale]
+          // means past its verify date, so ask rather than assert; (5d) means it
+          // was last confirmed five days ago, so a pantry/stock note is a
+          // snapshot. Both are SHORT because this is the tightest text in the
+          // system — the long wording ("last confirmed 5 days ago") pushed the
+          // block over budget and cost the oldest topic its slot. The legend is in
+          // the system prompt, paid for once instead of per fact.
+          const age = ageDays(f.updated_at);
           const marks =
             (f.pinned ? " [pinned]" : "") +
-            (isStale(f)
-              ? " [may be stale — ask, do not assert]"
-              : age
-                ? ` [last confirmed ${age}]`
-                : "");
+            (isStale(f) ? " [stale]" : age ? ` (${age})` : "");
           return `- ${f.key}: ${f.value}${marks}`;
         }),
       ].join("\n");
@@ -755,13 +812,11 @@ export async function retrieveMemory(
     }
     if (!chunks.length) return { block: "", facts: 0, chars: 0, usedFallback: false };
 
-    const block =
-      "## What Nova knows about the user (retrieved for this moment)\n" +
-      'An age ("last confirmed 5 days ago") means the fact was written then and ' +
-      "not corrected since. Pantry, stock, and status notes are SNAPSHOTS, not a " +
-      "live view — use the age or ask, and never state an aged note as present " +
-      "fact.\n\n" +
-      chunks.join("\n\n");
+    // No legend here: the markers are defined once in the system prompt. This
+    // block is the tightest text in the system and is paid for on every turn,
+    // and a four-line header repeated on every turn bought exactly one thing —
+    // a broken budget.
+    const block = `## What Nova knows about the user (retrieved for this moment)\n\n${chunks.join("\n\n")}`;
     return { block, facts: kept.length, chars: block.length, usedFallback: false };
   } catch {
     const block = await formatForContext().catch(() => "");
