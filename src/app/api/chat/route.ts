@@ -10,8 +10,8 @@ import { logChatMessages, getConversation, getThread } from "@/lib/chat-log";
 // `mode` is accepted but ignored: the assistant and the coach are now one
 // persona and one conversation.
 export async function POST(req: NextRequest) {
-  // `mode` is still accepted for backwards compatibility but is ignored: both
-  // doors now resolve to the same persona and the same conversation.
+  // No `mode`. There is one persona, so there is nothing to select — a client
+  // sending one is ignored by this destructuring, and no client does.
   const { message, client_id } = await req.json();
 
   const encoder = new TextEncoder();
