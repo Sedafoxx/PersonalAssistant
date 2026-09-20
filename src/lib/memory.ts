@@ -66,6 +66,26 @@ export function isStale(fact: { verify_after?: string | null }, now = Date.now()
   return !Number.isNaN(t) && t < now;
 }
 
+/**
+ * "5 days ago" for a fact or a summary that was not confirmed today, "" when it
+ * was. Pure and exported so it can be checked without a database.
+ *
+ * Age is the piece of information whose ABSENCE caused the kitchen failure of
+ * 2026-09-20: the pantry facts were five days old and rendered exactly like
+ * today's news, so the assistant said "you have no garlic" (and offered chicken
+ * to a vegan) with full confidence. The age is SHOWN, not interpreted — the
+ * prompt decides whether to use it or to ask. Deliberately not applied to
+ * facts from today: an age on everything is noise, and noise gets ignored.
+ */
+export function ageLabel(iso?: string | null, now = Date.now()): string {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return "";
+  const days = Math.floor((now - t) / 86_400_000);
+  if (days < 1) return "";
+  return days === 1 ? "1 day ago" : `${days} days ago`;
+}
+
 export interface MemoryTopic {
   id: string;
   slug: string;
@@ -572,6 +592,9 @@ interface RankedFact {
   kind?: FactKind;
   pinned: boolean;
   verify_after?: string | null;
+  /** When the fact was last written. Rendered as an age so old notes are not
+   *  presented as current reality. */
+  updated_at?: string | null;
   similarity: number;
 }
 
@@ -617,6 +640,7 @@ async function matchFacts(intent: string, limit: number): Promise<RankedFact[]> 
     kind: FactKind;
     pinned: boolean;
     verify_after: string | null;
+    updated_at: string | null;
   }[]).map((f) => ({ ...f, similarity: 0 }));
 }
 
@@ -648,6 +672,9 @@ export async function retrieveMemory(
 
     const titleOf = new Map(topics.map((t) => [t.id, t.title]));
     const summaryOf = new Map(topics.map((t) => [t.id, t.summary]));
+    const summaryWrittenOf = new Map(
+      topics.map((t) => [t.id, t.summary_updated_at])
+    );
 
     const floor: RankedFact[] = recent
       .filter((f) => f.pinned)
@@ -660,6 +687,7 @@ export async function retrieveMemory(
         kind: f.kind,
         pinned: f.pinned,
         verify_after: f.verify_after,
+        updated_at: f.updated_at,
         similarity: 0,
       }));
 
@@ -694,16 +722,30 @@ export async function retrieveMemory(
     for (const [topicId, list] of byTopic) {
       const title = titleOf.get(topicId) ?? "Other";
       const summary = summaryOf.get(topicId);
+      // A summary is a paragraph, so it carries no date of its own unless we
+      // give it one — and a stale summary reads like current truth ("planning a
+      // Linsen-Dal as their next dish" five days after the Dal was cooked).
+      const summaryAge = ageLabel(summaryWrittenOf.get(topicId) ?? null);
       const chunk = [
-        summary ? `### ${title} — ${summary}` : `### ${title}`,
-        ...list.map(
-          (f) =>
-            `- ${f.key}: ${f.value}${f.pinned ? " [pinned]" : ""}` +
-            // A state fact past its verify date is LABELLED, not hidden: the
-            // coach is told to ask instead of asserting. This is what stops
-            // "tofu: none left" from being stated as fact three weeks later.
-            (isStale(f) ? " [may be stale — ask, do not assert]" : "")
-        ),
+        summary
+          ? `### ${title}${summaryAge ? ` (summary written ${summaryAge})` : ""} — ${summary}`
+          : `### ${title}`,
+        ...list.map((f) => {
+          // LABEL, never hide, and say which label means what: a fact past its
+          // verify date is DECLARED shaky ("ask, do not assert"), while a fact
+          // that simply is not from today is shown with its age so the model can
+          // decide for itself. Both exist because a pantry note is not a lie —
+          // it is news with an expiry.
+          const age = ageLabel(f.updated_at);
+          const marks =
+            (f.pinned ? " [pinned]" : "") +
+            (isStale(f)
+              ? " [may be stale — ask, do not assert]"
+              : age
+                ? ` [last confirmed ${age}]`
+                : "");
+          return `- ${f.key}: ${f.value}${marks}`;
+        }),
       ].join("\n");
       // Always keep at least one topic, even if it alone exceeds the budget: an
       // empty memory block is worse than a long one.
@@ -713,7 +755,13 @@ export async function retrieveMemory(
     }
     if (!chunks.length) return { block: "", facts: 0, chars: 0, usedFallback: false };
 
-    const block = `## What Nova knows about the user (retrieved for this moment)\n\n${chunks.join("\n\n")}`;
+    const block =
+      "## What Nova knows about the user (retrieved for this moment)\n" +
+      'An age ("last confirmed 5 days ago") means the fact was written then and ' +
+      "not corrected since. Pantry, stock, and status notes are SNAPSHOTS, not a " +
+      "live view — use the age or ask, and never state an aged note as present " +
+      "fact.\n\n" +
+      chunks.join("\n\n");
     return { block, facts: kept.length, chars: block.length, usedFallback: false };
   } catch {
     const block = await formatForContext().catch(() => "");

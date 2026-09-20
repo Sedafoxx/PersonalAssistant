@@ -897,7 +897,7 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "remember_fact",
       description:
-        "Remember a durable fact about the user, keeping it current. Use when the user tells you something worth recalling long-term (a preference, a person, a routine, a constraint). Facts live under a topic and are keyed: writing the same topic+key again UPDATES the value instead of piling up duplicate rows, so it is always safe to call when something changes. You may add and update facts; you can never delete them.",
+        "Remember a durable fact about the user, keeping it current. Use when the user tells you something worth recalling long-term (a preference, a person, a routine, a constraint). Facts live under a topic and are keyed: writing the same topic+key again UPDATES the value instead of piling up duplicate rows, so it is always safe to call when something changes. You may add and update facts; you can never delete them. PIN A CONSTRAINT (diet, allergy, medical, never/always X) — an unpinned fact has to be retrieved to be seen, and a constraint that is only sometimes in front of you is what lets you suggest chicken to a vegan.",
       parameters: {
         type: "object",
         properties: {
@@ -912,6 +912,11 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
           value: {
             type: "string",
             description: "The current value to remember.",
+          },
+          pinned: {
+            type: "boolean",
+            description:
+              "True ONLY for a hard constraint (diet, allergy, medical, never/always X). A pinned fact is always in your context and is never silently overwritten, so pin sparingly and only what must never be violated.",
           },
         },
         required: ["topic", "key", "value"],
@@ -1508,7 +1513,13 @@ export async function executeTool(
         if (live) oldValue = live.value;
       }
 
-      const result = await upsertFact({ topic, key, value });
+      const pinned = input.pinned === true;
+      const result = await upsertFact({
+        topic,
+        key,
+        value,
+        ...(pinned ? { pinned: true } : {}),
+      });
       if (!result.fact) {
         return "I could not save that fact - please give a topic, key and value.";
       }
@@ -1518,10 +1529,13 @@ export async function executeTool(
         }
         return "Already had " + key + ": " + result.fact.value + " - nothing changed.";
       }
+      const pinNote = result.fact.pinned
+        ? " It is pinned, so it stays in front of me."
+        : "";
       if (oldValue !== null) {
-        return "Updated " + key + ": " + oldValue + " -> " + value + ".";
+        return "Updated " + key + ": " + oldValue + " -> " + value + "." + pinNote;
       }
-      return "Saved " + key + ": " + value + " under " + topic + ".";
+      return "Saved " + key + ": " + value + " under " + topic + "." + pinNote;
     }
 
     case "list_memory": {

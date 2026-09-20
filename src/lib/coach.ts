@@ -501,13 +501,17 @@ const MEMORY_SYSTEM = `You maintain the LONG-TERM MEMORY of a personal assistant
 
 Rules — these matter:
 - Re-use an existing key with a new value instead of inventing a near-duplicate: that is exactly how the store stays current.
+- ONE CONCEPT, ONE KEY, ONE TOPIC. "vegan" is ONE fact. Do not file it again under a second key ("diet", "ernährung", "ernährungsweise") or in a second topic: cross-topic duplicates are how a single truth ends up saying four slightly different things, of which only one gets retrieved.
 - NEVER express a removal. "ich habe keinen Tofu mehr" is key "tofu" with value "none left" — not a deletion.
 - Emit a fact ONLY when the exchange genuinely states it. Never infer, and never restate a value that has not changed.
+- KITCHEN, SUPPLIES, STOCK, AND WHAT WAS COOKED ARE ALWAYS kind "state" — never "durable", however settled they sound. "Verräte aktuell", "Gekochtes heute" and "Fehlende Gewürze" are snapshots. (Measured reason, 2026-09-20: a five-day-old pantry snapshot stored as durable got no verify date, so it was read back as today's kitchen — and the assistant told a vegan he had no garlic and proposed chicken.)
+- A CONSTRAINT IS PINNED. Diet, allergies, medical limits and "I never/always X" are not preferences: they filter everything the assistant may suggest. Store those with pinned=true so they can never fall out of its context, key "diet" (or the constraint's own name), kind "durable".
 - Keep the user's language for values they wrote in German.
 
 Return ONLY JSON:
-{"facts":[{"topic":"...","key":"...","value":"...","kind":"durable|state|derived"}]}
-- 0-6 facts. An empty array is the correct answer for small talk or pure logistics.`;
+{"facts":[{"topic":"...","key":"...","value":"...","kind":"durable|state|derived","pinned":false}]}
+- 0-6 facts. An empty array is the correct answer for small talk or pure logistics.
+- "pinned" is optional and true ONLY for a hard constraint.`;
 
 export async function extractMemories(
   userText: string,
@@ -530,7 +534,13 @@ export async function extractMemories(
   });
   const raw = (res.choices[0].message.content ?? "").trim();
   let parsed: {
-    facts?: { topic?: string; key?: string; value?: string; kind?: string }[];
+    facts?: {
+      topic?: string;
+      key?: string;
+      value?: string;
+      kind?: string;
+      pinned?: boolean;
+    }[];
   };
   try {
     parsed = JSON.parse(raw);
@@ -551,6 +561,10 @@ export async function extractMemories(
       key: (f.key ?? "").trim(),
       value: (f.value ?? "").trim(),
       kind: (KINDS.includes(f.kind as FactKind) ? f.kind : "durable") as FactKind,
+      // The extractor may PIN a fact but never unpin one: only `true` is passed
+      // through, so a bad extraction can never quietly loosen a constraint the
+      // user (or an earlier turn) deliberately pinned.
+      pinned: f.pinned === true,
     }))
     .filter((f) => f.topic.length > 0 && f.key.length > 0 && f.value.length > 0);
 
@@ -574,6 +588,7 @@ export async function extractMemories(
         key: f.key,
         value: f.value,
         kind: f.kind,
+        ...(f.pinned ? { pinned: true } : {}),
         source: "chat",
         // Provenance: the id of the user message this came from, so "nothing
         // lost" can be audited back to the sentence that produced it.
