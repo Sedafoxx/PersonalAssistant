@@ -112,7 +112,7 @@ const FLOWS = [
       "chat route reads the thread (+ the legacy coach thread)",
       "retrieval picks facts for THIS intent, pinned constraints always",
       "context assembled: day, goals, threads, promises, backlog, memory",
-      "model + 44 tools (search, capture, calendar, code, memory…)",
+      "the model + its tool surface (see npm run diagram for the loop itself)",
       "reply streamed to you",
       "the turn is logged, then facts are extracted (constraints pinned)",
     ],
