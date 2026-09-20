@@ -88,6 +88,12 @@ export interface FeedItem {
   published_at: string | null;
   duration_seconds: number | null;
   image_url: string | null;
+  // Popularity (migration 0030). NULL = unknown, never zero.
+  view_count?: number | null;
+  like_count?: number | null;
+  comment_count?: number | null;
+  channel_name?: string | null;
+  channel_subs?: number | null;
   validated: boolean;
   matched_interest_id: string | null;
   status: string;
@@ -97,7 +103,7 @@ export interface FeedItem {
 }
 
 const ITEM_COLS =
-  "id,url,kind,platform,title,summary,creator,published_at,duration_seconds,image_url,validated,matched_interest_id,status,surfaced_day,created_at,updated_at";
+  "id,url,kind,platform,title,summary,creator,published_at,duration_seconds,image_url,validated,matched_interest_id,status,surfaced_day,view_count,like_count,comment_count,channel_name,channel_subs,created_at,updated_at";
 
 /**
  * Keep a page from opening with six of the same thing.
@@ -1176,6 +1182,11 @@ export async function saveCandidates(
       published_at: i.candidate.published_at,
       duration_seconds: i.candidate.duration_seconds,
       image_url: i.candidate.image_url,
+      view_count: i.candidate.view_count ?? null,
+      like_count: i.candidate.like_count ?? null,
+      comment_count: i.candidate.comment_count ?? null,
+      channel_name: i.candidate.channel_name ?? null,
+      channel_subs: i.candidate.channel_subs ?? null,
       validated: true,
       status: "new",
       matched_interest_id: interestIdById.get(i.interest_id) ?? null,
@@ -1407,6 +1418,57 @@ export function itemMinutes(item: FeedItem): number {
 // feed: the question for every candidate is "which of this person's active goals
 // does it move him toward?", and the answer is an integer 1-5 with a reason that
 // names the goal. The calibration below is the user's own, written in because a
+/** 2465 → "2.5k", for a ranking block that has to stay small. Pure. */
+export function compactCount(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k`;
+  return String(n);
+}
+
+/**
+ * THE QUALITY FLOOR, in code rather than in the prompt.
+ *
+ * The complaint (2026-09-20): "interesting title but very poor quality videos".
+ * Measured in the stored pool: a salary-negotiation video with **2,465 views** had
+ * scored 5/5 — the top of the feed — and a 228-view upload from a 982-subscriber
+ * channel sat at 3. A rubric that judges the TOPIC cannot see either, and a title
+ * is the cheapest thing on the internet to produce.
+ *
+ * Applied AFTER the model scores, and only on evidence: a video whose counts are
+ * unknown is never capped, because unmeasured is not the same as bad. Two tiers,
+ * because views alone mislead on a niche topic — the harsh one also needs a small
+ * channel.
+ */
+export function qualityCap(
+  item: Pick<FeedItem, "kind" | "view_count" | "channel_subs">,
+  score: number
+): { score: number; why: string } {
+  if (item.kind !== "video") return { score, why: "" };
+  const views = item.view_count ?? null;
+  const subs = item.channel_subs ?? null;
+  if (views == null) return { score, why: "" };
+  if (views < 1000 && (subs == null || subs < 10000)) {
+    return score <= 1
+      ? { score, why: "" }
+      : { score: 1, why: `${views} views, and no channel big enough to vouch for it` };
+  }
+  if (views < 5000 && (subs == null || subs < 20000)) {
+    // `subs == null` is deliberately inside the cap, not outside it: the video that
+    // caused this (2,465 views, channel size unknown) escaped the first version of
+    // this rule for exactly that reason. An unknown channel is not a large one.
+    return score <= 2
+      ? { score, why: "" }
+      : {
+          score: 2,
+          why:
+            subs == null
+              ? `${views} views, channel size unknown`
+              : `${views} views from a ${compactCount(subs)}-subscriber channel`,
+        };
+  }
+  return { score, why: "" };
+}
+
 // keyword list cannot tell "basics" he is past from "basics" he needs.
 const RANK_SYSTEM = `You rank a specific person's candidate reading, watching and listening for one day. This is a GOAL feed, not a news feed: for every candidate the question is "which of this person's active goals does it move him toward?". You are honest and severe. He wants to get SMARTER, not to be entertained. A high score is a promise, and a vague reason is worse than no item at all.
 
@@ -1423,6 +1485,8 @@ Score every candidate with an INTEGER 1-5:
 CALIBRATION (his own, follow it literally):
 - He is ADVANCED at AI and vibecoding. Basics he already has score LOW: "Basics of Vibe Coding Explained" is a 2. Content at HIS level scores HIGH: limits, design patterns, and agents.
 - Product, gear, buy and top-N content scores LOW regardless of topic, because it does not make him smarter. "Best 6 Tennisballmaschinen" is a 1.
+- PRODUCTION QUALITY IS EVIDENCE, NOT TASTE (added 2026-09-20, after a 2,465-view salary-negotiation video scored 5). A video that is a list of tips read aloud, an AI voiceover over stock footage, a screen recording with nobody explaining it, or a re-upload is a 1 or a 2 — however promising the title. A good title is the cheapest thing on the internet to produce.
+- USE THE NUMBERS when a video shows them. Under ~5k views from a channel under ~20k subscribers is a hobby upload: 2 or less, unless the substance is genuinely exceptional (a primary source, a practitioner's first-hand account, a talk by the person who did the work). 100k+ views from a 100k+ subscriber channel that is ABOUT the goal is a 3 or 4. When the numbers are absent, judge the substance alone and do not guess popularity from the title.
 - Tennis TECHNIQUE and TRAINING are relevant (Play tennis regularly); equipment lists and ball-machine reviews are not.
 - ABOUT, NOT MERELY ADJACENT. The item must BE ABOUT the goal; touching it in passing is not enough. A general multi-topic interview podcast — a show whose real subject is whichever guest happens to be on — that brushes leadership, habits or money somewhere inside it is a 2, NEVER a 3 or a 4, even though its topics overlap a goal. Concretely: an episode titled "Invest Like Warren Buffett & How To Disagree Better" is a 2 for the leadership goal, because the episode is ABOUT those two talking points and only adjacent to leadership. Reserve 3 and above for items whose own SUBJECT is the goal.
 - A BARE LINK TEACHES NOTHING. A link to someone's website or product — a landing page, a pricing page, a launch post, including every Show HN submission, which is a link plus a discussion thread — is a 1 or a 2 and never higher: the link itself has no substance, and the discussion is its only substance. Judge such an item on that discussion alone, and when there is none, score it 1.
@@ -1537,9 +1601,16 @@ function candidateBlock(items: FeedItem[], interestText: Map<string, string>): s
       const minutes = Math.round(itemMinutes(item));
       const creator = item.creator ? ` · by ${item.creator}` : "";
       const summary = (item.summary ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+      // Popularity, when it is known. Shown so the rubric's own instruction to
+      // use the numbers has something to point at — and absent, rather than zero,
+      // when it is not, so the model can tell "nobody watched it" from "unknown".
+      const views = item.view_count != null ? `${compactCount(item.view_count)} views` : null;
+      const subs = item.channel_subs != null ? `${compactCount(item.channel_subs)} subs` : null;
+      const pop = [views, subs].filter(Boolean).join(" · ");
       return (
         `[${index}] ${item.title} · ${item.kind} · ${item.platform}${creator} · ~${minutes} min\n` +
         `    interest: ${interest ?? "(unknown)"}\n` +
+        (pop ? `    popularity: ${pop}\n` : "") +
         (summary ? `    summary: ${summary}\n` : "")
       );
     })
@@ -1823,7 +1894,9 @@ export async function scoreCandidates(
 
   let droppedBlankReason = 0;
   let droppedNoGoal = 0;
+  let cappedQuality = 0;
   const scored: ScoredCandidate[] = [];
+  // (cappedQuality is reported after the loop; see below.)
   for (const r of ranked) {
     const item = byIndex.get(r.index);
     if (!item) continue;
@@ -1835,10 +1908,19 @@ export async function scoreCandidates(
     }
     const match = r.goal ? goalByTitle.get(r.goal.trim().toLowerCase()) : undefined;
     if (!match) droppedNoGoal++;
+    // The cap is applied HERE, after the model, because a rubric is a request and
+    // this is a rule. The reason is amended rather than replaced: the model's own
+    // judgement stays visible next to the demotion, so a wrongly capped item can
+    // still be recognised as such.
+    const cap = qualityCap(item, r.score);
+    if (cap.why) {
+      cappedQuality++;
+      console.log(`  [feed] quality cap: "${item.title}" ${r.score} → ${cap.score} (${cap.why})`);
+    }
     scored.push({
       item,
-      score: r.score,
-      reason: r.reason,
+      score: cap.score,
+      reason: cap.why ? `${r.reason} [demoted: ${cap.why}]` : r.reason,
       goal: match ? match.title : r.goal,
       goalId: match ? match.id : null,
     });
@@ -1855,6 +1937,13 @@ export async function scoreCandidates(
   // droppedOmitted is what SURVIVED the retry rather than what triggered it: a
   // retry that recovered every candidate leaves 0 here, and a retry that did not
   // leaves a number that says so.
+  if (cappedQuality) {
+    console.log(
+      `  [feed] the quality cap demoted ${cappedQuality} video(s) below their scored value ` +
+        `(watch for this rate: it is the difference between an interesting title and a good video)`
+    );
+  }
+
   const droppedOmitted = omitted.length;
   if (droppedOmitted > 0) {
     console.log(

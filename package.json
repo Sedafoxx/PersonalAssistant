@@ -29,6 +29,8 @@
     "memory:oneshop:test": "node --env-file=.env.local --import tsx scripts/memory-oneshop-test.ts",
     "feed:page:test": "node --env-file=.env.local --import tsx scripts/feed-page-test.ts",
     "feed:describe": "node --env-file=.env.local --import tsx scripts/feed-descriptions-backfill.ts",
+    "feed:quality": "node --env-file=.env.local --import tsx scripts/feed-quality-sweep.ts",
+    "youtube:test": "node --env-file=.env.local --import tsx scripts/youtube-quality-test.ts",
     "search:test": "node --env-file=.env.local --import tsx scripts/search-rank-test.ts",
     "memory:kitchen": "node --env-file=.env.local --import tsx scripts/memory-fix-kitchen.ts",
     "map": "node --env-file=.env.local scripts/system-map.mjs",

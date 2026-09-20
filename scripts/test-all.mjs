@@ -30,6 +30,7 @@ const TESTS = [
   { file: "todo-lifecycle-test.ts", tier: "cheap", what: "todo resolution: done work leaves the day, history survives" },
   { file: "search-rank-test.ts", tier: "cheap", what: "search ranking + bilingual query normalisation (position, not presence)" },
   { file: "memory-retrieval-test.ts", tier: "cheap", what: "retrieval: floor, per-topic cap, stale labelling" },
+  { file: "youtube-quality-test.ts", tier: "cheap", what: "view-count parsing + the video quality cap (pure)" },
   { file: "memory-test.ts", tier: "llm", what: "commitments ledger, loops lifecycle, capture check" },
   { file: "memory-oneshop-test.ts", tier: "llm", what: "one write path (facts only) + consolidation safety" },
   { file: "review-test.ts", tier: "llm", what: "nightly review: one row per run, it reports and changes nothing" },

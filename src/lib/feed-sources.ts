@@ -35,6 +35,16 @@ export interface Candidate {
   published_at: string | null;
   duration_seconds: number | null;
   image_url: string | null;
+  /**
+   * Popularity, when it is known. NULL means UNKNOWN, never zero: a video whose
+   * counts could not be read is judged on its substance, because silently
+   * demoting everything unmeasured is how a feed empties itself.
+   */
+  view_count?: number | null;
+  like_count?: number | null;
+  comment_count?: number | null;
+  channel_name?: string | null;
+  channel_subs?: number | null;
 }
 
 // --- URL canonicalisation ---------------------------------------------------
@@ -263,6 +273,141 @@ export async function searchArticles(query: string): Promise<Candidate[]> {
     }));
 }
 
+// --- YouTube: is this video worth anyone's time? -----------------------------
+//
+// The complaint that produced this (2026-09-20): 81 videos stored, and a
+// salary-negotiation video with **2,465 views** sitting at 5/5 — the top of the
+// pool — while a 464k-subscriber channel's video sat at 3. The rubric judged the
+// TOPIC and never asked whether the video was any good, and an interesting title
+// is the cheapest thing on the internet to produce.
+//
+// Two sources, in order of trust:
+//   1. the Data API (exact, needs a free key, covers every video),
+//   2. the page text Tavily returns ("2,465 views", "2910 subscribers" — measured
+//      at 13 of 81 stored rows, so useful but not sufficient),
+//   3. unknown, which stays unknown.
+
+/** "2,465" → 2465, "1.2M" → 1200000, "478K" → 478000, junk → null. Pure. */
+export function parseCount(raw: string): number | null {
+  const m = String(raw ?? "").replace(/[,\s]/g, "").match(/^([\d.]+)([KMB])?$/i);
+  if (!m) return null;
+  const n = Number.parseFloat(m[1]);
+  if (!Number.isFinite(n)) return null;
+  const unit = (m[2] ?? "").toUpperCase();
+  const mult = unit === "K" ? 1e3 : unit === "M" ? 1e6 : unit === "B" ? 1e9 : 1;
+  return Math.round(n * mult);
+}
+
+export interface YouTubeStats {
+  views: number | null;
+  likes: number | null;
+  subs: number | null;
+}
+
+/** The counts YouTube's own page text carries. Pure, so it can be tested. */
+export function parseYouTubeStats(text: string): YouTubeStats {
+  const s = String(text ?? "");
+  const pick = (re: RegExp): number | null => {
+    const m = re.exec(s);
+    return m ? parseCount(m[1]) : null;
+  };
+  return {
+    views: pick(/([\d.,]+[KMB]?)\s+views?\b/i),
+    likes: pick(/([\d.,]+[KMB]?)\s+likes?\b/i),
+    subs: pick(/([\d.,]+[KMB]?)\s+subscribers?\b/i),
+  };
+}
+
+/** ISO-8601 duration ("PT12M30S") → seconds. Pure. */
+export function iso8601Seconds(value: string): number | null {
+  const m = /^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/.exec(String(value ?? ""));
+  if (!m) return null;
+  const total =
+    Number(m[1] ?? 0) * 86400 + Number(m[2] ?? 0) * 3600 + Number(m[3] ?? 0) * 60 + Number(m[4] ?? 0);
+  return total > 0 ? total : null;
+}
+
+/** The id in a watch URL, or null. Pure. */
+export function youTubeId(url: string): string | null {
+  return /[?&]v=([A-Za-z0-9_-]{6,})/.exec(String(url ?? ""))?.[1] ?? null;
+}
+
+export interface YouTubeFacts extends YouTubeStats {
+  duration_seconds: number | null;
+  channel_name: string | null;
+  comment_count: number | null;
+}
+
+/**
+ * Exact counts from YouTube Data API v3, in batches of 50 (1 quota unit per
+ * batch against 10,000/day, so free in practice).
+ *
+ * Returns null when YOUTUBE_API_KEY is unset — the caller then falls back to the
+ * page text — and never throws: a feed that dies because a statistics call failed
+ * is worse than a feed without numbers.
+ */
+export async function youtubeVideoFacts(
+  ids: string[]
+): Promise<Record<string, YouTubeFacts> | null> {
+  const key = process.env.YOUTUBE_API_KEY;
+  if (!key || !ids.length) return null;
+  const out: Record<string, YouTubeFacts> = {};
+  try {
+    for (let i = 0; i < ids.length; i += 50) {
+      const batch = ids.slice(i, i + 50);
+      const res = await safeFetch(
+        `https://www.googleapis.com/youtube/v3/videos?part=statistics,contentDetails,snippet` +
+          `&id=${batch.join(",")}&key=${key}`
+      );
+      if (!res || !res.ok) continue;
+      const data = (await res.json()) as {
+        items?: {
+          id?: string;
+          statistics?: { viewCount?: string; likeCount?: string; commentCount?: string };
+          contentDetails?: { duration?: string };
+          snippet?: { channelTitle?: string; channelId?: string };
+        }[];
+      };
+      const channelIds = new Set<string>();
+      for (const item of data.items ?? []) {
+        if (!item.id) continue;
+        if (item.snippet?.channelId) channelIds.add(item.snippet.channelId);
+        out[item.id] = {
+          views: item.statistics?.viewCount ? Number(item.statistics.viewCount) : null,
+          likes: item.statistics?.likeCount ? Number(item.statistics.likeCount) : null,
+          subs: null,
+          duration_seconds: iso8601Seconds(item.contentDetails?.duration ?? ""),
+          channel_name: item.snippet?.channelTitle ?? null,
+          comment_count: item.statistics?.commentCount ? Number(item.statistics.commentCount) : null,
+        };
+      }
+      if (!channelIds.size) continue;
+      // A second call for the channels: subscriber count is the best available
+      // signal for "is this a real resource or one person's hobby upload".
+      const chRes = await safeFetch(
+        `https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${[...channelIds].join(",")}&key=${key}`
+      );
+      if (!chRes || !chRes.ok) continue;
+      const chData = (await chRes.json()) as {
+        items?: { id?: string; statistics?: { subscriberCount?: string } }[];
+      };
+      const subsByChannel = new Map<string, number | null>();
+      for (const c of chData.items ?? []) {
+        subsByChannel.set(c.id ?? "", c.statistics?.subscriberCount ? Number(c.statistics.subscriberCount) : null);
+      }
+      for (const item of data.items ?? []) {
+        const cid = item.snippet?.channelId ?? "";
+        if (item.id && subsByChannel.has(cid) && out[item.id]) {
+          out[item.id].subs = subsByChannel.get(cid) ?? null;
+        }
+      }
+    }
+  } catch {
+    // Partial results are still worth keeping.
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Video search, restricted to real watch pages, then confirmed via oEmbed.
 export async function searchYouTube(query: string): Promise<Candidate[]> {
   const results = await tavily(`${query} site:youtube.com/watch`, "general");
@@ -294,10 +439,57 @@ export async function searchYouTube(query: string): Promise<Candidate[]> {
     });
   }
 
-  // Everything that survives the URL filter still has to pass oEmbed, which
-  // also replaces the title with YouTube's own.
+  // Popularity BEFORE validation: a video we know nobody watched should not cost
+  // an oEmbed call, and it should never reach the ranker to be argued up to a 3 on
+  // the strength of an interesting title.
+  const ids = out.map((c) => youTubeId(c.url)).filter((x): x is string => !!x);
+  const facts = await youtubeVideoFacts(ids);
+  const minViews = Number(process.env.FEED_MIN_VIEWS ?? 2000);
+  const enriched: Candidate[] = [];
+  let droppedSmall = 0;
+  let known = 0;
+  for (const c of out) {
+    const id = youTubeId(c.url);
+    const api = id && facts ? facts[id] : undefined;
+    const fromText = parseYouTubeStats(`${c.title} ${c.summary ?? ""}`);
+    const view_count = api?.views ?? fromText.views;
+    if (view_count != null) known++;
+    const item: Candidate = {
+      ...c,
+      // The API's duration is authoritative. The page text's "[13:39]" is NOT
+      // parsed: it collides with timestamps inside transcripts.
+      duration_seconds: api?.duration_seconds ?? c.duration_seconds,
+      creator: c.creator ?? api?.channel_name ?? null,
+      view_count,
+      like_count: api?.likes ?? fromText.likes,
+      comment_count: api?.comment_count ?? null,
+      channel_name: api?.channel_name ?? null,
+      channel_subs: api?.subs ?? fromText.subs,
+    };
+    // THE FLOOR, which is what was asked for: "at least x views". Applied ONLY
+    // when the count is known — dropping everything unmeasured would quietly empty
+    // the feed instead of filtering it, and an unknown popularity is not evidence
+    // of anything. Tune with FEED_MIN_VIEWS.
+    if (view_count != null && view_count < minViews) {
+      droppedSmall++;
+      continue;
+    }
+    enriched.push(item);
+  }
+  if (out.length && (droppedSmall || !facts)) {
+    console.log(
+      `  [feed] youtube: ${known}/${out.length} video(s) had a view count, ${droppedSmall} dropped ` +
+        `under ${minViews} views` +
+        (facts
+          ? ""
+          : " — no YOUTUBE_API_KEY, so only the ones whose page text carried a count could be judged")
+    );
+  }
+
+  // Everything that survives still has to pass oEmbed, which also replaces the
+  // title with YouTube's own.
   const validated: Candidate[] = [];
-  for (const c of out.slice(0, 6)) {
+  for (const c of enriched.slice(0, 6)) {
     if (await validate(c)) validated.push(c);
   }
   return validated;
