@@ -493,8 +493,8 @@ export async function curateTopic(topicId: string): Promise<string | null> {
 
 // --- prompt context ---------------------------------------------------------
 
-// Compact markdown for the coach prompt, in the same "##"-section style as
-// buildCoachContext. One line per topic with its summary, then its facts as
+// Compact markdown for the assistant's prompt, in the same "##"-section style as
+// buildAssistantContext. One line per topic with its summary, then its facts as
 // "- key: value" (pinned marked). Returns "" when there is nothing to say.
 export async function formatForContext(opts?: {
   maxTopics?: number;

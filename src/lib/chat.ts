@@ -15,7 +15,7 @@ export const LLM_MODEL = process.env.LLM_MODEL ?? "gpt-4o";
 
 // The ONE persona, and it has a name: Nova. Everything the assistant knows how
 // to do — capture, tool discipline, coaching, day planning — lives here, in one
-// place. coachSystemPrompt() below only adds live grounding on top.
+// place. assistantSystemPrompt() below only adds live grounding on top.
 //
 // The name in the prompt is not decoration: the model introduces itself, and it
 // must introduce itself as the same one partner the UI shows. (The "coach" in
@@ -97,15 +97,17 @@ LATE NIGHTS: if they are reflecting after midnight, they almost certainly mean t
 
 export type ChatMessage = { role: "user" | "assistant"; content: string };
 
-// Both modes now resolve to the SAME persona (SYSTEM_PROMPT); the mode no
-// longer selects a voice. It stays exported because the Alexa skill and other
-// existing callers import it, but it no longer changes which prompt is used.
-export type ChatMode = "assistant" | "coach";
+// There is no persona parameter here any more, and no "coach" mode. There used
+// to be both: the mode never changed which prompt was used (both doors led to
+// SYSTEM_PROMPT) and the only caller left was a test, so it was a distinction
+// with no consequence anywhere except in the reading of this file. One identity,
+// one entry point, no switch to make. (Alexa and the web chat call runAssistant
+// exactly the same way, and always did.)
 
 // The one persona, plus the live digest of goals / recent mood / open actions /
 // people as grounding. The persona text itself lives in exactly one place
 // (SYSTEM_PROMPT); the only difference is this live context.
-export function coachSystemPrompt(userContext: string): string {
+export function assistantSystemPrompt(userContext: string): string {
   return `${SYSTEM_PROMPT}
 
 Live context about the user right now:
@@ -117,12 +119,11 @@ ${userContext}`;
 // skill, so voice and web always get identical behaviour.
 export async function runAssistant(
   messages: ChatMessage[],
-  opts: { mode?: ChatMode; userContext?: string } = {}
+  opts: { userContext?: string } = {}
 ): Promise<string> {
-  // One persona regardless of mode: whenever grounding is supplied we use the
-  // live-context prompt, otherwise the bare persona.
+  // Grounding when the caller has it, the bare persona when it does not.
   const system = opts.userContext
-    ? coachSystemPrompt(
+    ? assistantSystemPrompt(
         opts.userContext.trim() ||
           "No additional context loaded — use your tools (list_goals) to see their goals."
       )

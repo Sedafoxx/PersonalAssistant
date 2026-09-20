@@ -1,3 +1,12 @@
+// Nova's CONTEXT and her daily rituals: the builder that assembles what she
+// knows right now (buildAssistantContext), the morning/evening check-in, the day
+// plan, mood history, and the memory extraction that runs after a turn.
+//
+// The file is still named "coach" because these were the Coach tab's features.
+// That tab is gone, and the name is now only a label on a bag of features, not a
+// second identity: there is ONE assistant, ONE prompt (src/lib/chat.ts) and ONE
+// memory store (src/lib/memory.ts). Read "coach" here as "the morning/evening
+// ritual", never as "the other agent".
 import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
 import { getGoals, type Goal } from "./goals";
@@ -161,7 +170,7 @@ function formatThread(l: OpenLoop): string {
  * message, so the facts that reach the prompt are the ones relevant to what they
  * actually asked. Without it, memory is selected for a generic planning moment.
  */
-export async function buildCoachContext(
+export async function buildAssistantContext(
   opts: { intent?: string } = {}
 ): Promise<string> {
   const db = createServiceClient();
@@ -407,7 +416,7 @@ export async function coachReply(
   kind: CheckinKind,
   hints?: { mood?: number; energy?: number; focus?: string; yesterday?: string }
 ): Promise<CoachReply> {
-  const context = await buildCoachContext();
+  const context = await buildAssistantContext();
   const dayPart = kind === "morning" ? "A MORNING check-in: help them set up today." : "An EVENING check-in: help them wrap up and pick one thing for tomorrow.";
   const hintPart =
     hints?.mood != null ? `\nUser mood today: ${hints.mood}/5.` : "";
@@ -463,70 +472,19 @@ async function resolveGoal(title: string | null): Promise<string | null> {
   return goals.find((g) => g.title.toLowerCase() === title.toLowerCase())?.id ?? null;
 }
 
-// --- long-term memory ("backlog") ------------------------------------------
-
-export type MemoryKind =
-  | "fact"
-  | "person"
-  | "preference"
-  | "decision"
-  | "win"
-  | "pattern"
-  | "goal_note";
-
-export interface CoachMemory {
-  id: string;
-  kind: MemoryKind;
-  text: string;
-  category: string | null;
-  source: string | null;
-  pinned: boolean;
-  created_at: string;
-}
-
-const MEMORY_COLS = "id,kind,text,category,source,pinned,created_at";
-
-export async function getCoachMemories(limit = 60): Promise<CoachMemory[]> {
-  const db = createServiceClient();
-  const { data, error } = await db
-    .from("coach_memory")
-    .select(MEMORY_COLS)
-    .order("pinned", { ascending: false })
-    .order("created_at", { ascending: false })
-    .limit(limit);
-  if (error) throw new Error(error.message);
-  return (data ?? []) as CoachMemory[];
-}
-
-export async function addCoachMemory(
-  text: string,
-  kind: MemoryKind = "fact",
-  opts: { category?: string | null; source?: string | null; pinned?: boolean } = {}
-): Promise<CoachMemory | null> {
-  const clean = text.trim().slice(0, 500);
-  if (!clean) return null;
-  const db = createServiceClient();
-  // de-dupe: skip if a near-identical memory already exists
-  const { data: existing } = await db
-    .from("coach_memory")
-    .select("id,text")
-    .ilike("text", clean)
-    .limit(1);
-  if (existing && existing.length) return null;
-  const { data, error } = await db
-    .from("coach_memory")
-    .insert({
-      text: clean,
-      kind,
-      category: opts.category ?? null,
-      source: opts.source ?? "manual",
-      pinned: opts.pinned ?? false,
-    })
-    .select(MEMORY_COLS)
-    .maybeSingle();
-  if (error) throw new Error(error.message);
-  return (data as CoachMemory) ?? null;
-}
+// --- the SECOND memory store is gone ---------------------------------------
+//
+// Here used to live getCoachMemories() / addCoachMemory() and the MemoryKind
+// union: readers and writers for `coach_memory`, the older free-text store (up
+// to three uncorrectable prose notes per chat turn, which is how 552 of them
+// accumulated). Since the memory refactor, a turn writes FACTS only
+// (src/lib/memory.ts), and the consolidation pass moved those notes in. The only
+// remaining caller of these two functions was /api/coach/memory, an endpoint
+// with no UI, no cron and no test behind it — so it is deleted too.
+//
+// ONE memory store now. The `coach_memory` TABLE stays exactly as it is: it is
+// still read by the consolidation pass as source material, and it is history no
+// code may silently drop.
 
 // Extract durable memory from a conversation turn (best-effort, non-fatal).
 //

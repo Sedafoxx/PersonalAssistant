@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { runAssistant } from "@/lib/chat";
-import { buildCoachContext, extractMemories } from "@/lib/coach";
+import { buildAssistantContext, extractMemories } from "@/lib/coach";
 import { logChatMessages, getConversation, getThread } from "@/lib/chat-log";
 
 // Chat contract: POST { message: string, client_id?: string, mode?: "assistant"|"coach" }.
@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
         // asked, instead of every fact Nova happens to hold.
         let userContext: string | undefined;
         try {
-          userContext = await buildCoachContext({ intent: userText });
+          userContext = await buildAssistantContext({ intent: userText });
         } catch {
           userContext = undefined; // coach tables may not exist yet
         }

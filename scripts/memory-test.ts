@@ -24,7 +24,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createServiceClient } from "../src/lib/supabase";
 import { deleteItem } from "../src/lib/db";
-import { buildCoachContext } from "../src/lib/coach";
+import { buildAssistantContext } from "../src/lib/coach";
 import {
   extractCommitments,
   looksLikeCommitment,
@@ -435,7 +435,7 @@ async function testLoopLifecycle(tablesOk: boolean): Promise<void> {
     // The property that makes M3 worth anything: the context the model receives
     // must show the thread as a state PLUS a next step, not as prose it can only
     // read back.
-    const threadContext = await buildCoachContext({
+    const threadContext = await buildAssistantContext({
       intent: "what should I do about the venue answer",
     });
     check(

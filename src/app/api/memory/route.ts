@@ -20,8 +20,8 @@ export const dynamic = "force-dynamic";
 // uses this to let the user edit a value, pin a fact so the AI stops overwriting
 // it, retire a fact, and resolve (or reject) a removal the assistant proposed.
 //
-// This is separate from /api/coach/memory, which serves the older free-text
-// memory store.
+// This is the ONLY memory endpoint. /api/coach/memory, which served the older
+// free-text store, is gone with the rest of the coach surface.
 
 const STATUSES: FactStatus[] = ["active", "superseded", "pending_removal"];
 

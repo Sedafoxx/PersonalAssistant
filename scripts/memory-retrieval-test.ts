@@ -33,7 +33,7 @@ import {
   formatForContext,
   MEMORY_BUDGET_CHARS,
 } from "../src/lib/memory";
-import { buildCoachContext } from "../src/lib/coach";
+import { buildAssistantContext } from "../src/lib/coach";
 
 const db = createServiceClient();
 const unique = `memtest-${Date.now()}`;
@@ -231,7 +231,7 @@ async function main(): Promise<void> {
     // --- 6. the prompt ------------------------------------------------------
     console.log("\n-- 6. the coach prompt carries retrieved memory, not a dump --");
 
-    const context = await buildCoachContext({ intent: "what should I cook this week" });
+    const context = await buildAssistantContext({ intent: "what should I cook this week" });
     const hasRetrieved = context.includes("## What Nova knows about the user (retrieved for this moment)");
     const hasOldDump =
       context.includes("## What you remember about the user (long-term)") ||

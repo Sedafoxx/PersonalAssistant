@@ -34,7 +34,7 @@ import { createGoal, deleteGoal } from "../src/lib/goals";
 import { createItem } from "../src/lib/db";
 import { createMilestone } from "../src/lib/milestones";
 import { getBacklog, formatBacklogForContext, type Backlog } from "../src/lib/backlog";
-import { buildCoachContext } from "../src/lib/coach";
+import { buildAssistantContext } from "../src/lib/coach";
 import { TOOL_DEFINITIONS, executeTool } from "../src/lib/claude-tools";
 import { runAssistant } from "../src/lib/chat";
 import { localDay } from "../src/lib/day";
@@ -377,9 +377,9 @@ async function testFormatting(): Promise<void> {
 
 /** CHECK 5 — the ammunition actually reaches the coach context. */
 async function testCoachContext(seed: StalledPair): Promise<void> {
-  console.log("\n-- 5. buildCoachContext carries the stalled milestone --");
+  console.log("\n-- 5. buildAssistantContext carries the stalled milestone --");
 
-  const context = await buildCoachContext();
+  const context = await buildAssistantContext();
   const sectionIdx = context.indexOf("## What has stalled and what is waiting in the backlog");
   // The milestone ALSO appears in the earlier "Milestones per goal" list, so the
   // title has to be found INSIDE the backlog section, not merely somewhere in
@@ -473,7 +473,7 @@ async function testPlanJudgement(): Promise<void> {
   console.log("\n-- 7. The real planner, with a planning prompt (NOTE — model judgement) --");
 
   try {
-    const context = await buildCoachContext();
+    const context = await buildAssistantContext();
     const reply = await runAssistant(
       [
         {
@@ -483,7 +483,7 @@ async function testPlanJudgement(): Promise<void> {
             "today? Walk me through it. Don't add anything yet.",
         },
       ],
-      { mode: "coach", userContext: context }
+      { userContext: context }
     );
 
     // 7b MEASURES the mechanism; it does not grade the prose. This is the check

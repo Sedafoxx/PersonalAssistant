@@ -2,7 +2,11 @@ import OpenAI from "openai";
 import { createServiceClient } from "./supabase";
 import { createItem, getItems } from "./db";
 import { getThread, getRecentChat } from "./chat-log";
-import { localDay } from "./coach";
+// localDay comes from day.ts, NOT from ./coach. It used to be imported from
+// there (a re-export that happened to live in the coach module), which made every
+// commitment read look like it depended on the coach — and created a
+// coach → commitments → coach import cycle. The day helper belongs to the day.
+import { localDay } from "./day";
 
 // --- commitments ledger -----------------------------------------------------
 //

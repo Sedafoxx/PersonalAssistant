@@ -30,7 +30,7 @@ import { deleteItem } from "../src/lib/db";
 import { buildDailyBrief, formatBriefText, briefAgeDays, type DailyBrief } from "../src/lib/brief";
 import { upsertLoop, staleLoops, type OpenLoop } from "../src/lib/loops";
 import { createCommitment, type Commitment } from "../src/lib/commitments";
-import { buildCoachContext } from "../src/lib/coach";
+import { buildAssistantContext } from "../src/lib/coach";
 
 const db = createServiceClient();
 
@@ -518,7 +518,7 @@ async function testReadOnly(tablesOk: boolean): Promise<void> {
 
 /** CHECK 6 — the coach sees the same facts, so it cannot contradict the brief. */
 async function testCoachContext(tablesOk: boolean): Promise<void> {
-  console.log("\n-- 6. buildCoachContext knows the loops and promises --");
+  console.log("\n-- 6. buildAssistantContext knows the loops and promises --");
 
   if (!tablesOk) {
     check(
@@ -539,7 +539,7 @@ async function testCoachContext(tablesOk: boolean): Promise<void> {
     // The section is called "Threads and promises" since M3 (threads became the
     // entity layer). The old title is asserted as ABSENT too, so a rename cannot
     // quietly leave the check passing against a section that no longer exists.
-    const context = await buildCoachContext();
+    const context = await buildAssistantContext();
     const sectionIdx = context.indexOf("## Threads and promises");
     const staleTitleIdx = context.indexOf("## Open loops and promises");
     const threadIdx = context.indexOf(thread);
