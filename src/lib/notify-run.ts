@@ -3,7 +3,7 @@ import { createServiceClient } from "./supabase";
 import { getItems, getItemsDueForNotification, updateItem } from "./db";
 import { hasEntryToday } from "./journal";
 import { hasReflectionToday } from "./reflection";
-import { hasOpenMorningCheckin, getGoalReview } from "./coach";
+import { getGoalReview } from "./coach";
 import { generateSuggestions } from "./suggestions";
 import { daysUntil } from "./dates";
 import { captureCheck } from "./commitments";
@@ -77,7 +77,6 @@ export async function runNotificationRun(kind: NotifyKind) {
 
   let journalNudge = false;
   let reflectionNudge = false;
-  let coachNudge = false;
   let goalReviewNudge = false;
   let dueSoonNudge = false;
   // Morning-only memory sections (P6a). Each is best-effort: a failure leaves
@@ -96,7 +95,9 @@ export async function runNotificationRun(kind: NotifyKind) {
         title: "Weekly goal check-in",
         body: review.prompt,
         icon: "/icon-192.png",
-        url: "/?tab=coach",
+        // Straight into the conversation with the check-in opener pre-filled.
+        // The Coach tab is gone; a goal review is a conversation, not a screen.
+        url: "/?tab=chat&prompt=goals",
       });
       goalReviewNudge = true;
     } catch {
@@ -116,20 +117,13 @@ export async function runNotificationRun(kind: NotifyKind) {
       reflectionNudge = true;
     }
   } else {
-    // 2b. Morning coach nudge — 2-min check-in, only if still open.
-    try {
-      if (await hasOpenMorningCheckin()) {
-        sent += await pushAll({
-          title: "Coach",
-          body: "2-min check-in: how's the mood, and what's your one focus today?",
-          icon: "/icon-192.png",
-          url: "/?tab=coach",
-        });
-        coachNudge = true;
-      }
-    } catch {
-      // coach table may not exist yet — non-fatal
-    }
+    // (The old "2b. Morning coach nudge" is GONE. It pushed a 2-min check-in into
+    // the Coach tab, and both the tab and the check-in screen it opened no longer
+    // exist — with no screen to write a check-in row, the "still open?" test was
+    // permanently true, so this would have buzzed him every morning forever about
+    // a form that isn't there. The morning is now one journal nudge, and the
+    // planning he used that screen for happens by simply talking to Nova.)
+
     // 2c. Morning journal nudge — only if nothing logged today.
     if (!(await hasEntryToday())) {
       sent += await pushAll({
@@ -242,7 +236,8 @@ export async function runNotificationRun(kind: NotifyKind) {
           title: "Memory check",
           body: lines.join(" · "),
           icon: "/icon-192.png",
-          url: "/?tab=coach",
+          // The notebook lives in the Stats tab now ("What I remember").
+          url: "/?tab=stats",
         });
         memoryNudge = true;
       }
@@ -268,7 +263,6 @@ export async function runNotificationRun(kind: NotifyKind) {
     resolvedTodos,
     journalNudge,
     reflectionNudge,
-    coachNudge,
     dueSoonNudge,
     goalReviewNudge,
     suggestionsAdded,

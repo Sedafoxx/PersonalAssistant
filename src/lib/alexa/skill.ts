@@ -50,7 +50,7 @@ class LaunchHandler implements RequestHandler {
   handle(input: HandlerInput): Response {
     return input.responseBuilder
       .speak(
-        "Welcome to your personal assistant. You can add, remove, or check your grocery and shopping lists by voice. For example, say add milk to my grocery list, or ask me anything else you'd normally type in the app."
+        "Welcome to Nova, your personal assistant. You can add, remove, or check your grocery and shopping lists by voice. For example, say add milk to my grocery list, or ask me anything else you'd normally type in the app."
       )
       .reprompt("What would you like to do?")
       .getResponse();

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { STAT_KEYS, type StatKey } from "@/lib/stats";
+import { MemoryPanel } from "@/components/memory/MemoryPanel";
 
 // The Stats tab: milestones CRUD per active goal plus a hand-rolled metrics
 // dashboard (SVG / CSS only — no chart dependency). One call to
@@ -344,6 +345,11 @@ export function StatsPanel() {
             </>
           )}
         </section>
+
+        {/* What Nova remembers. Moved here when the Coach tab was removed: this
+            is the only place the user can read and correct the assistant's
+            notebook, and it belongs with the record, not with coaching. */}
+        <MemoryPanel />
       </div>
     </div>
   );

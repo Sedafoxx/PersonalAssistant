@@ -2,8 +2,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Personal Assistant",
-  description: "Your AI-powered personal assistant",
+  title: "Nova",
+  description: "Nova — your personal assistant",
   manifest: "/manifest.json",
 };
 

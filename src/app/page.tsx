@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { CoachPanel } from "@/components/coach/CoachPanel";
 import { ListsPanel } from "@/components/lists/ListsPanel";
 import { TodayPanel } from "@/components/today/TodayPanel";
 import { FeedPanel } from "@/components/feed/FeedPanel";
@@ -14,9 +13,16 @@ import { setupNotifications } from "@/lib/notifications";
 // reflection both happen in the conversation now, and the entries they produced
 // still live in the database and still feed the assistant's context. Two forms
 // asking what a conversation should ask was the whole problem.
-type Tab = "chat" | "today" | "feed" | "coach" | "lists" | "stats";
+//
+// The Coach tab is gone for the same reason, and it was the last one standing:
+// the morning plan, the evening wrap-up, the leftover triage and the goal
+// conversation are all just things Nova does in the conversation, and the tab
+// had become a second, staler door onto the same brain. What did NOT belong to
+// the conversation — the notebook of facts, and the ability to correct it — moved
+// to the Stats tab (see MemoryPanel), which is the record, not the coaching.
+type Tab = "chat" | "today" | "feed" | "lists" | "stats";
 
-const TABS: Tab[] = ["chat", "today", "feed", "coach", "lists", "stats"];
+const TABS: Tab[] = ["chat", "today", "feed", "lists", "stats"];
 
 export default function Home() {
   const [refreshKey, setRefreshKey] = useState(0);
@@ -75,7 +81,7 @@ export default function Home() {
             </svg>
           </button>
           <h1 className="text-sm font-semibold text-gray-300 hidden sm:block">
-            Personal Assistant
+            Nova
           </h1>
 
           {/* Tabs */}
@@ -103,8 +109,6 @@ export default function Home() {
             <TodayPanel />
           ) : tab === "feed" ? (
             <FeedPanel />
-          ) : tab === "coach" ? (
-            <CoachPanel />
           ) : tab === "lists" ? (
             <ListsPanel refreshKey={refreshKey} />
           ) : (

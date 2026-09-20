@@ -614,7 +614,7 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "search_items",
       description:
-        "Search across ALL item types (todos, notes, ideas) by keyword and meaning. Always searches every type — do not assume the user means only ideas. Use the user's words as the query.",
+        "Search across ALL item types (todos, notes, ideas) by keyword and meaning — the notebook mixes German and English, and the search understands both. Always searches every type — do not assume the user means only ideas. Use the user's own words as the query (a whole sentence is fine). Results come back already ranked, strongest match first: ANSWER FROM THE TOP OF THE LIST, and if the top hits are not actually about the thing that was asked, say so rather than padding the reply with weak matches.",
       parameters: {
         type: "object",
         properties: {
@@ -940,7 +940,7 @@ export const TOOL_DEFINITIONS: OpenAI.ChatCompletionTool[] = [
     function: {
       name: "forget_fact",
       description:
-        "Propose removing one remembered fact. This does NOT delete anything: it flags the fact as pending removal and the user must confirm the removal in the Coach tab. Use only when the user asks you to forget something.",
+        "Propose removing one remembered fact. This does NOT delete anything: it flags the fact as pending removal and the user must confirm the removal in the Stats tab (\"What I remember\"). Use only when the user asks you to forget something.",
       parameters: {
         type: "object",
         properties: {
@@ -1027,10 +1027,18 @@ export async function executeTool(
     }
 
     case "search_items": {
+      // getItems already ranks by relevance (literal coverage first, then the
+      // bilingual synonyms, then meaning). Cap what the model sees: 45 rows is
+      // not more information, it is a haystack — and the far end of it is what
+      // made a search that HAD the answer read as "I found nothing".
       const items = await getItems({
         query: input.query as string,
       });
-      return JSON.stringify({ items });
+      return JSON.stringify({
+        total: items.length,
+        shown: Math.min(items.length, 12),
+        items: items.slice(0, 12),
+      });
     }
 
     case "add_to_list": {
@@ -1559,9 +1567,9 @@ export async function executeTool(
       }
 
       // PROPOSE ONLY. This never deletes: the row is flagged for removal and the
-      // human confirms it in the Coach tab. The assistant must not erase facts
-      // on its own, because a wrong deletion is unrecoverable while a stale fact
-      // is merely corrected.
+      // human confirms it in the Stats tab ("What I remember"). The assistant
+      // must not erase facts on its own, because a wrong deletion is
+      // unrecoverable while a stale fact is merely corrected.
       const topics = await getTopics();
       const needle = topicArg.toLowerCase();
       const topic =
@@ -1580,7 +1588,7 @@ export async function executeTool(
         live.key +
         ": " +
         live.value +
-        ". I do not delete facts on my own - confirm it in the Coach tab and it will go."
+        ". I do not delete facts on my own - confirm it in the Stats tab (What I remember) and it will go."
       );
     }
 

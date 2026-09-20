@@ -16,9 +16,9 @@ export const dynamic = "force-dynamic";
 //
 // The assistant may add and update facts, but it may never delete them, so this
 // route deliberately exposes no hard delete: "removing" a fact is a status
-// change that keeps the row for history. The Coach tab uses this to let the user
-// edit a value, pin a fact so the AI stops overwriting it, retire a fact, and
-// resolve (or reject) a removal the coach proposed.
+// change that keeps the row for history. The "What I remember" panel (Stats tab)
+// uses this to let the user edit a value, pin a fact so the AI stops overwriting
+// it, retire a fact, and resolve (or reject) a removal the assistant proposed.
 //
 // This is separate from /api/coach/memory, which serves the older free-text
 // memory store.

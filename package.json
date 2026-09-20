@@ -28,7 +28,8 @@
     "memory:consolidate": "node --env-file=.env.local --import tsx scripts/memory-consolidate.ts",
     "memory:oneshop:test": "node --env-file=.env.local --import tsx scripts/memory-oneshop-test.ts",
     "feed:page:test": "node --env-file=.env.local --import tsx scripts/feed-page-test.ts",
-    "feed:describe": "node --env-file=.env.local --import tsx scripts/feed-descriptions-backfill.ts"
+    "feed:describe": "node --env-file=.env.local --import tsx scripts/feed-descriptions-backfill.ts",
+    "search:test": "node --env-file=.env.local --import tsx scripts/search-rank-test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.49.4",

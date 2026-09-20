@@ -26,16 +26,16 @@ function splitChoices(raw: string): { text: string; choices?: Choices } {
 const WELCOME: Message = {
   role: "assistant",
   content:
-    "Hey! I'm your personal assistant. Tell me what's on your mind — I'll help you capture todos, notes, and ideas, set reminders, keep everything organized, and now I can also search the web and read files.",
+    "Hey! I'm Nova. Tell me what's on your mind — I'll help you capture todos, notes, and ideas, set reminders, keep everything organized, remember what matters, and search the web when I need to.",
 };
 
 const TEXT_EXTS = /\.(txt|md|csv|json|ts|tsx|js|jsx|py|sql|html|css|log|ini|yml|yaml|xml)$/i;
 const MAX_ATTACH_CHARS = 50000;
 
-// (The persona type is gone: one assistant, one conversation.)
-
-// There is one identity now, so there is one welcome: the assistant and the
-// coach are the same partner and the persona lives in the server prompt.
+// One identity, and it has a name: Nova. The assistant and the coach were never
+// two people — the UI implied it for a while, and the header said so out loud
+// ("Assistant and coach, one conversation"). There is one welcome because there
+// is one partner, and the persona itself lives in the server prompt.
 function randomId(): string {
   return (
     window.crypto?.randomUUID?.() ??
@@ -163,8 +163,9 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
   // Restore history on mount. `?mode=` deep links still work but no longer select
   // anything: there is only one conversation.
   //
-  // `?prompt=reflection` is how the Reflections view hands over now that it is
-  // read-only. It PRE-FILLS the message rather than sending it, deliberately:
+  // `?prompt=…` is how notifications hand over: the evening reflection nudge and
+  // the weekly goal check-in both open the conversation with their opener
+  // pre-filled. It PRE-FILLS the message rather than sending it, deliberately:
   // auto-sending would have to race the history restore, and sendText closes over
   // the `messages` of this render — so it would wipe the conversation it had just
   // loaded. Prefilling also lets you edit the opener before sending.
@@ -173,6 +174,7 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
     try {
       const q = new URLSearchParams(window.location.search).get("prompt");
       if (q === "reflection") setInput("I want to do my evening reflection.");
+      if (q === "goals") setInput("I want to do my weekly goal check-in.");
     } catch {
       // no query string available
     }
@@ -358,7 +360,7 @@ export function ChatPanel({ onItemsChange }: { onItemsChange: () => void }) {
       <div className="px-4 pt-3 border-b border-white/5">
         <div className="flex items-center justify-between gap-2">
           <p className="text-xs text-gray-500">
-            Assistant and coach, one conversation
+            Nova · one conversation
           </p>
           <button
             onClick={newChat}

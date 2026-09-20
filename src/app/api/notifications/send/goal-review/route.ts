@@ -5,7 +5,8 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
 // Weekly goal-review cron — nudges the user to reflect on goals that need
-// attention and links into the Coach tab. Exports GET (Vercel cron) and POST.
+// attention and opens the conversation with the check-in pre-filled (the Coach
+// tab it used to link into no longer exists). Exports GET (Vercel cron) and POST.
 async function handle() {
   try {
     return NextResponse.json(await runNotificationRun("goal_review"));
