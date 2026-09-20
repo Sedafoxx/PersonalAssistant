@@ -11,6 +11,19 @@ import {
 } from "../src/lib/coding-agent";
 
 async function main() {
+  // PREFLIGHT. The worker is a separate local process (npm run agent). Without it
+  // every check below fails for the same environmental reason, which reads like
+  // five broken features and sends you looking in the wrong place — it cost one
+  // confusing "agent-test FAILED 5/5 in 0.3s" run to write this. Report it once
+  // and exit 0, so a test runner can say "skipped" instead of crying wolf.
+  const probe = await codeRunCommand('node -e "process.stdout.write(\'ping\')"');
+  if (!probe.includes("ping")) {
+    console.log("SKIPPED: the coding-agent worker is not reachable.");
+    console.log(`      ${probe.split("\n")[0]}`);
+    console.log("      start it with: npm run agent (needs CODING_AGENT_TOKEN)");
+    return;
+  }
+
   const failures: string[] = [];
   const check = (label: string, cond: boolean) => {
     console.log(`${cond ? "PASS" : "FAIL"}: ${label}`);

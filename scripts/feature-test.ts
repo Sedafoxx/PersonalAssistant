@@ -36,9 +36,18 @@ async function main() {
   const db = createServiceClient();
   await db.from("chat_messages").delete().eq("client_id", cid);
 
-  // 2. search_web wired (no key → graceful message)
+  // 2. search_web is wired. The old assertion hard-required the "not configured"
+  //    message, so it broke the day a Tavily key existed: it was testing the
+  //    ENVIRONMENT, not the code, and it reported a working feature as a failure.
+  //    Both environments are correct behaviour; only one of them is yours today.
+  const hasTavilyKey = !!process.env.TAVILY_API_KEY;
   const res = await searchWeb("latest news");
-  check("search_web wired (no-key message)", /not configured/i.test(res));
+  check(
+    hasTavilyKey
+      ? "search_web wired (key present: real results)"
+      : "search_web wired (no key: graceful message)",
+    hasTavilyKey ? res.length > 0 && !/not configured/i.test(res) : /not configured/i.test(res)
+  );
 
   // 3. fetch_url reads a page
   const page = await fetchPageText("https://example.com");

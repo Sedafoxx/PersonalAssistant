@@ -113,89 +113,25 @@ export function isShortformSocial(url: string): boolean {
 }
 
 // --- relevance --------------------------------------------------------------
-
-// Words that appear in almost every phrase and so distinguish nothing.
-const RELEVANCE_STOPWORDS = new Set([
-  "with", "from", "that", "this", "your", "about", "into", "over", "more",
-  "best", "for", "and", "the",
-]);
-
-// Words that turn up in unending content titles, so a match on one of them proves
-// nothing about fit. A pickleball episode titled "Skill Ratings, Tournament
-// Pickleball, the IPTPA, Tips for Advanced Players" was matching a TENNIS query on
-// tips/advanced/players alone — three generic words, no tennis. A match made only
-// of these therefore does not count, which is what keeps a look-alike hobby out.
-const GENERIC_TOKENS = new Set([
-  "tips", "advanced", "players", "ideas", "guide", "training", "basics",
-  "tricks", "highlights", "review", "explained", "complete", "episode",
-]);
-
-// Lowercase words of >= 4 characters, minus the stopwords. Applied to the query
-// and to the interest label; the candidate's own text is tokenised the same way.
-function relevanceTokens(text: string): Set<string> {
-  return new Set(
-    String(text ?? "")
-      .toLowerCase()
-      .split(/[^a-z0-9äöüß]+/)
-      .filter((w) => w.length >= 4 && !RELEVANCE_STOPWORDS.has(w))
-  );
-}
-
-// The gate that makes the point of a feed: FIT, not volume.
 //
-// A candidate is kept when ANY query token appears in its title/summary/creator,
-// or when at least one token of the interest itself does. Everything else is
-// dropped as rejectedRelevance — Apple's episode search returning "Chapter 1:
-// Our Pickleball Journeys" for a tennis query is the case this exists for.
-export function isRelevant(
-  c: Candidate,
-  query: string,
-  interestText: string,
-  titleOnly = false,
-  requireLabel = false
-): boolean {
-  try {
-    // Some sources are loose enough that a match anywhere in a description means
-    // nothing, so for those the match must be in the TITLE. The caller decides,
-    // because at gate time the raw candidate may not carry its own kind yet.
-    const haystackText =
-      titleOnly || c.kind === "podcast"
-        ? (c.title ?? "")
-        : `${c.title ?? ""} ${c.summary ?? ""} ${c.creator ?? ""}`;
-    const haystack = relevanceTokens(haystackText);
-    if (!haystack.size) return false;
-
-    // A word from the interest LABEL is the strongest evidence of fit: it is the
-    // thing the user actually cares about. One such match is enough.
-    for (const t of relevanceTokens(interestText)) {
-      if (haystack.has(t)) return true;
-    }
-
-    // A title that names none of the labels is not evidence of fit at all, and for
-    // the loosest source that is the whole test. This is the rule that catches
-    // "TO CATCH A CHEATER: Why Is Her Boyfriend Secretly Booking a Hotel Every
-    // Week?!" for an interest in reading more books: it matched the phrase "how to
-    // read more books every week" on the words "every" and "week", which is a
-    // coincidence of English, not a recommendation.
-    if (requireLabel) return false;
-
-    // Falling back to the search phrase alone is weaker, so it needs two matches
-    // and at least one that is not generic — otherwise "tips for advanced
-    // players" would let in any sport at all.
-    const queryMatches = [...relevanceTokens(query)].filter((t) => haystack.has(t));
-    if (
-      queryMatches.length >= 2 &&
-      queryMatches.some((t) => !GENERIC_TOKENS.has(t))
-    ) {
-      return true;
-    }
-    return false;
-  } catch {
-    // A gate that throws would empty a source; treat it as "keep" only when it
-    // genuinely cannot decide, which cannot happen here — so drop.
-    return false;
-  }
-}
+// HERE USED TO LIVE the ingest-time word gate: `isRelevant`, `relevanceTokens`,
+// RELEVANCE_STOPWORDS and GENERIC_TOKENS. Deleted 2026-09-20, for two reasons:
+//
+//   1. NOTHING CALLED IT. Ingest stopped filtering by words at P5 — "the model,
+//      not a regex, decides what fits" (see feed.ts, where the batch is pushed
+//      with no gate). The only remaining references were its own doc comment and
+//      a stale line in the podcast source claiming "the relevance gate is applied
+//      by the caller".
+//   2. A DEAD GATE IS WORSE THAN NO GATE. Its comment promised that everything
+//      unmatched "is dropped as rejectedRelevance", naming Apple's
+//      Pickleball-episode-for-a-tennis-query as the case it caught — while nothing
+//      was dropping anything. A reader who believed that line would trust a filter
+//      that had been switched off years of commits ago.
+//
+// What actually decides fit is the ranker's judgement (scoreCandidates in
+// feed.ts), which is why the suite now counts off-topic survivors as a reported
+// smell rather than a code failure. Do not re-add a keyword gate here without
+// removing that judgement path first.
 
 // --- small helpers ----------------------------------------------------------
 
@@ -601,8 +537,13 @@ export async function spotifyStatus(): Promise<{
 }
 
 // Spotify when configured, keyless iTunes otherwise. Reports which one ran.
-// The relevance gate is applied by the caller (discoverCandidates), which is
-// the only place that also knows the interest text.
+//
+// The user's search phrase IS this source's only filter — deliberately. Ingest
+// does not pass through a word gate any more (see the note where the old one used
+// to be), because a podcast title and an interest label often share no vocabulary
+// even when the episode is exactly right ("How to Be Better at Anything" for a
+// leadership goal). The ranker's judgement decides, and it is allowed to reject
+// these — which is exactly what the "relevance smell" NOTE in feed-test watches.
 export async function searchPodcasts(query: string): Promise<PodcastSearch> {
   const token = await spotifyToken();
   if (token) {
