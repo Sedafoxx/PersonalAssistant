@@ -34,6 +34,7 @@
     "search:test": "node --env-file=.env.local --import tsx scripts/search-rank-test.ts",
     "memory:kitchen": "node --env-file=.env.local --import tsx scripts/memory-fix-kitchen.ts",
     "map": "node --env-file=.env.local scripts/system-map.mjs",
+    "cleanup:language": "node --env-file=.env.local --import tsx scripts/cleanup-language.ts",
     "diagram": "node scripts/agent-diagram.mjs",
     "test:fast": "node scripts/test-all.mjs",
     "test:all": "node scripts/test-all.mjs --tier all",

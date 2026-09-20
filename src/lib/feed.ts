@@ -505,6 +505,35 @@ function tokens(text: string): Set<string> {
   );
 }
 
+/**
+ * German markers for an interest LABEL. The UI is English even though the user's
+ * data is German, so a label is copy, not a quote — the derivation prompt asks for
+ * English, and this is where the request is enforced.
+ *
+ * Why here and not (only) in the test: the test asserts on the ACTIVE set, so a
+ * German label used to be written to the table, then retired by the hysteresis a
+ * run or two later. Seven had accumulated that way and nobody had ever seen one —
+ * invisible, but only by luck. The test keeps its own list on purpose (a test that
+ * imports the implementation's constants asserts nothing).
+ */
+export const LABEL_GERMAN_WORDS = [
+  "der", "die", "das", "und", "mit", "für", "von", "im", "zum", "zur",
+  "gehalt", "rezepte", "üben", "besorgen", "vermeiden", "abendreflexion",
+  "morgensport", "grundgewürze", "kokosmilch", "beziehungsroutine",
+  // the seven that actually leaked (2026-09-20), which the list above missed
+  // because they contain no umlaut and no function word
+  "wohnung", "gestalten", "organisieren", "vegane", "frühstück", "joghurt",
+  "beeren", "nüssen", "günstig", "kochen", "einkaufsliste", "freunden",
+  "planen", "bücher", "lesen", "gewohnheit", "zeit", "mehr",
+];
+
+/** True when a label reads German. Umlauts catch some, the word list the rest. */
+export function looksGerman(text: string): boolean {
+  if (/[äöüßÄÖÜ]/.test(text)) return true;
+  const words = String(text).toLowerCase().split(/[^a-zäöüß]+/).filter(Boolean);
+  return words.some((w) => LABEL_GERMAN_WORDS.includes(w));
+}
+
 // Jaccard overlap of two labels' significant tokens. >= 0.6 means "the same
 // area" — the belt-and-braces for language-varying near-duplicates.
 export function tokenOverlap(a: string, b: string): number {
@@ -570,6 +599,15 @@ function parseCandidates(
     const evidence = String(item.evidence ?? "").trim().slice(0, 500);
 
     const candidate: Candidate = { slug, text, kind, weight, queries, evidence };
+
+    // Rule 0: the label must be readable English. Dropped BEFORE the merge rules
+    // so a German label cannot even attach itself to a good area's text, and
+    // LOGGED rather than counted: an invisible rejection is how seven of these
+    // piled up in the first place.
+    if (looksGerman(text)) {
+      console.log(`  [feed] dropped an interest label that was not English: "${text}"`);
+      continue;
+    }
 
     // Rule 1: identical slug is the same area. Keep the higher weight and
     // concatenate the evidence so neither cited signal is lost.
