@@ -52,6 +52,17 @@ interface Overview {
   mood: { day: string; mood: number | null }[];
   today: { planned: number; done: number };
   movementToday: DayMovement;
+  // Today's wins — the summary the Coach tab used to render. Optional in the
+  // type on purpose: the card renders from whatever the API managed to gather.
+  wins?: {
+    habits_done: number;
+    habits_total: number;
+    reflection_completed: boolean;
+    todos_completed: number;
+    journaled: boolean;
+    mood: number | null;
+    lines: string[];
+  };
 }
 
 interface GoalMovement {
@@ -207,6 +218,38 @@ export function StatsPanel() {
             </span>{" "}
             tasks complete.
           </p>
+        </section>
+
+        {/* Today's wins. This was the Coach tab's "wins card": the numbers were
+            still being computed for a screen that no longer existed, which is the
+            worst of both worlds — a summary nobody could see. It belongs here,
+            next to the rest of the record. */}
+        <section className="bg-[#1a1a1a] border border-white/10 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[11px] uppercase tracking-wide text-gray-500">
+              {"Today's wins"}
+            </p>
+            {data.wins && (
+              <p className="text-[10px] text-gray-600 tabular-nums">
+                {data.wins.habits_done}/{data.wins.habits_total} habits
+                {data.wins.journaled ? " · journaled" : ""}
+                {data.wins.reflection_completed ? " · reflected" : ""}
+              </p>
+            )}
+          </div>
+          {!data.wins || data.wins.lines.length === 0 ? (
+            <p className="text-xs text-gray-600">
+              Nothing logged yet today — the first small thing counts.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {data.wins.lines.map((line, i) => (
+                <li key={i} className="text-xs text-gray-300 leading-relaxed">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         {/* Moved forward today — across life dimensions */}

@@ -8,7 +8,7 @@ import {
   type Milestone,
 } from "@/lib/milestones";
 import { getTaskTrend, getDayMetrics, getMovementToday, localDay } from "@/lib/day";
-import { getMoodHistory } from "@/lib/coach";
+import { getMoodHistory, getDailyWins } from "@/lib/coach";
 
 export const dynamic = "force-dynamic";
 
@@ -80,6 +80,11 @@ export async function GET() {
       tasksDone: 0,
       milestonesDone: 0,
     }));
+    // Today's wins: habits ticked, reflection written, todos finished. This was
+    // still being computed with no screen behind it once the Coach tab went (the
+    // card lived there) — the Stats tab is where it belongs. Best-effort, and
+    // null-safe all the way down: a missing reflection must not blank the page.
+    const wins = await getDailyWins().catch(() => null);
 
     return NextResponse.json({
       life: {
@@ -116,6 +121,15 @@ export async function GET() {
         goalsMoved: num(movementToday.goalsMoved),
         tasksDone: num(movementToday.tasksDone),
         milestonesDone: num(movementToday.milestonesDone),
+      },
+      wins: {
+        habits_done: num(wins?.habits_done),
+        habits_total: num(wins?.habits_total),
+        reflection_completed: !!wins?.reflection_completed,
+        todos_completed: num(wins?.todos_completed),
+        journaled: !!wins?.journaled,
+        mood: wins?.mood == null ? null : num(wins.mood),
+        lines: wins?.lines ?? [],
       },
     });
   } catch (err) {
